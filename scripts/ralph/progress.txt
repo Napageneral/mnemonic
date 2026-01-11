@@ -242,3 +242,27 @@ Project: comms — Unified Communications Cartographer
   - Text output shows filter description when filters applied
   - Validate direction enum (sent/received/observed) early before querying
   - Result struct includes both Count and Events array for JSON consumers
+
+---
+
+## 2026-01-11 - US-010 People command lists contacts
+- Implemented `comms people` command with three modes: list all, search, and person detail
+- List mode: `comms people` shows all contacts sorted by event count (DESC)
+- Top N mode: `comms people --top 20` limits to top N contacts by event count
+- Search mode: `comms people --search 'term'` searches by name or identifier
+- Detail mode: `comms people 'Name'` shows full details for a specific person
+- All modes support JSON output via --json flag
+- Reuses identify package functions (ListAll, Search, GetPersonByName) for consistency
+- **Files changed:**
+  - cmd/comms/main.go (added people command with list/search/detail modes)
+  - AGENTS.md (added people command patterns)
+  - scripts/ralph/prd.json (marked US-010 as passing)
+- **Learnings:**
+  - Reusing existing packages reduces duplication - identify package already had all needed functions
+  - Cobra Args: cobra.MaximumNArgs(1) allows 0 or 1 positional argument
+  - Mode switching: check len(args) to distinguish list mode (no args) from detail mode (1 arg)
+  - --top N flag is simple to implement when results are already sorted by desired field
+  - Text output formatting: inline identities for list view (channel:identifier), detailed for detail view
+  - Display name formatting: show [display_name] if different from canonical_name
+  - Event statistics add context: show event count and last event timestamp in listings
+  - Consistent Result struct pattern works well across all commands
