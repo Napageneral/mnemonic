@@ -15,6 +15,7 @@ import (
 	"github.com/Napageneral/comms/internal/me"
 	"github.com/Napageneral/comms/internal/query"
 	"github.com/Napageneral/comms/internal/sync"
+	"github.com/Napageneral/comms/internal/timeline"
 	"github.com/spf13/cobra"
 )
 
@@ -1669,8 +1670,176 @@ queryable event store with identity resolution.`,
 	peopleCmd.Flags().Int("top", 0, "Show only top N persons by event count")
 	rootCmd.AddCommand(peopleCmd)
 
+	// timeline command
+	timelineCmd := &cobra.Command{
+		Use:   "timeline [period]",
+		Short: "Show events in a time period",
+		Long: `Display events grouped by day for a specified time period.
+
+Examples:
+  comms timeline 2026-01         # January 2026
+  comms timeline 2026-01-15      # Specific day
+  comms timeline --today         # Today's events
+  comms timeline --week          # This week (Mon-Sun)`,
+		Args: cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			type DayResult struct {
+				Date        string         `json:"date"`
+				TotalEvents int            `json:"total_events"`
+				BySender    map[string]int `json:"by_sender"`
+				ByChannel   map[string]int `json:"by_channel"`
+				ByDirection map[string]int `json:"by_direction"`
+			}
+
+			type Result struct {
+				OK        bool        `json:"ok"`
+				Message   string      `json:"message,omitempty"`
+				StartDate string      `json:"start_date,omitempty"`
+				EndDate   string      `json:"end_date,omitempty"`
+				Days      []DayResult `json:"days,omitempty"`
+			}
+
+			result := Result{OK: true}
+
+			// Determine time range
+			var opts timeline.TimelineOptions
+			var rangeDesc string
+
+			useToday, _ := cmd.Flags().GetBool("today")
+			useWeek, _ := cmd.Flags().GetBool("week")
+
+			if useToday {
+				opts = timeline.GetTodayRange()
+				rangeDesc = "today"
+			} else if useWeek {
+				opts = timeline.GetWeekRange()
+				rangeDesc = "this week"
+			} else if len(args) == 1 {
+				var err error
+				opts, err = timeline.ParseTimelineArg(args[0])
+				if err != nil {
+					result.OK = false
+					result.Message = err.Error()
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+				rangeDesc = args[0]
+			} else {
+				result.OK = false
+				result.Message = "Please specify a time period (e.g., '2026-01') or use --today or --week"
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n\n", result.Message)
+					fmt.Fprintf(os.Stderr, "Usage:\n")
+					fmt.Fprintf(os.Stderr, "  comms timeline 2026-01         # Month view\n")
+					fmt.Fprintf(os.Stderr, "  comms timeline 2026-01-15      # Single day\n")
+					fmt.Fprintf(os.Stderr, "  comms timeline --today         # Today\n")
+					fmt.Fprintf(os.Stderr, "  comms timeline --week          # This week\n")
+				}
+				os.Exit(1)
+			}
+
+			result.StartDate = opts.StartDate.Format("2006-01-02")
+			result.EndDate = opts.EndDate.Format("2006-01-02")
+
+			// Open database
+			database, err := db.Open()
+			if err != nil {
+				result.OK = false
+				result.Message = fmt.Sprintf("Failed to open database: %v", err)
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Query timeline
+			days, err := timeline.QueryTimeline(database, opts)
+			if err != nil {
+				result.OK = false
+				result.Message = fmt.Sprintf("Failed to query timeline: %v", err)
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			// Convert to result format
+			for _, day := range days {
+				result.Days = append(result.Days, DayResult{
+					Date:        day.Date,
+					TotalEvents: day.TotalEvents,
+					BySender:    day.BySender,
+					ByChannel:   day.ByChannel,
+					ByDirection: day.ByDirection,
+				})
+			}
+
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				// Text output
+				fmt.Printf("Timeline for %s (%s to %s)\n\n", rangeDesc, result.StartDate, result.EndDate)
+
+				if len(days) == 0 {
+					fmt.Println("No events found in this time period.")
+					return
+				}
+
+				for _, day := range days {
+					fmt.Printf("📅 %s (%d events)\n", day.Date, day.TotalEvents)
+
+					// Show top senders
+					if len(day.BySender) > 0 {
+						fmt.Print("  Senders: ")
+						senderStrs := []string{}
+						for sender, count := range day.BySender {
+							senderStrs = append(senderStrs, fmt.Sprintf("%s (%d)", sender, count))
+						}
+						fmt.Println(strings.Join(senderStrs, ", "))
+					}
+
+					// Show channels
+					if len(day.ByChannel) > 0 {
+						fmt.Print("  Channels: ")
+						channelStrs := []string{}
+						for channel, count := range day.ByChannel {
+							channelStrs = append(channelStrs, fmt.Sprintf("%s (%d)", channel, count))
+						}
+						fmt.Println(strings.Join(channelStrs, ", "))
+					}
+
+					// Show direction breakdown
+					if len(day.ByDirection) > 0 {
+						fmt.Print("  Direction: ")
+						dirStrs := []string{}
+						for direction, count := range day.ByDirection {
+							dirStrs = append(dirStrs, fmt.Sprintf("%s (%d)", direction, count))
+						}
+						fmt.Println(strings.Join(dirStrs, ", "))
+					}
+
+					fmt.Println()
+				}
+			}
+		},
+	}
+
+	timelineCmd.Flags().Bool("today", false, "Show today's events")
+	timelineCmd.Flags().Bool("week", false, "Show this week's events")
+	rootCmd.AddCommand(timelineCmd)
+
 	// TODO: Add more commands as per PRD
-	// - timeline
 	// - tag
 	// - db
 

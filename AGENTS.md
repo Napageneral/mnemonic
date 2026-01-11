@@ -151,6 +151,12 @@ make build
 - Support both list mode (no args) and detail mode (person name arg) in people command
 - --top N flag limits results to top N by event count (already sorted by identify.ListAll)
 - Format identities inline for list view (channel:identifier), detailed for detail view
+- Timeline queries use DATE(timestamp, 'unixepoch', 'localtime') for day grouping in SQLite
+- Timeline supports flexible date parsing: YYYY (year), YYYY-MM (month), YYYY-MM-DD (day)
+- Time range calculation: Use time.Date with AddDate for precise start/end boundaries
+- Week range: Calculate Monday of current week (Sunday = 7 for weekday calculation)
+- Timeline aggregation: Group events by date, then by sender/channel/direction for statistics
+- Map data structures for timeline stats enable easy aggregation and display
 
 ## Schema Quick Reference
 
