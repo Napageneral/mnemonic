@@ -8,8 +8,10 @@ import (
 	"github.com/Napageneral/comms/internal/config"
 	"github.com/Napageneral/comms/internal/db"
 	"github.com/Napageneral/comms/internal/me"
+	"github.com/Napageneral/comms/internal/sync"
 	"github.com/spf13/cobra"
 	"path/filepath"
+	"context"
 )
 
 var (
@@ -640,8 +642,109 @@ queryable event store with identity resolution.`,
 	connectCmd.AddCommand(connectGmailCmd)
 	rootCmd.AddCommand(connectCmd)
 
+	// sync command
+	syncCmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Sync communications from adapters",
+		Long:  "Synchronize communications from all enabled adapters or a specific adapter",
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK       bool                  `json:"ok"`
+				Message  string                `json:"message,omitempty"`
+				Adapters []sync.AdapterResult  `json:"adapters,omitempty"`
+			}
+
+			adapterName, _ := cmd.Flags().GetString("adapter")
+			full, _ := cmd.Flags().GetBool("full")
+
+			// Load config
+			cfg, err := config.Load()
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to load config: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			// Open database
+			database, err := db.Open()
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to open database: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Create context
+			ctx := context.Background()
+
+			// Sync adapters
+			var syncResult sync.SyncResult
+			if adapterName != "" {
+				syncResult = sync.SyncOne(ctx, database, cfg, adapterName, full)
+			} else {
+				syncResult = sync.SyncAll(ctx, database, cfg, full)
+			}
+
+			result := Result{
+				OK:       syncResult.OK,
+				Message:  syncResult.Message,
+				Adapters: syncResult.Adapters,
+			}
+
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				if !syncResult.OK && syncResult.Message != "" {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", syncResult.Message)
+					os.Exit(1)
+				}
+
+				if len(syncResult.Adapters) == 0 {
+					fmt.Println(syncResult.Message)
+					return
+				}
+
+				// Print results for each adapter
+				fmt.Println("Sync results:")
+				for _, adapterResult := range syncResult.Adapters {
+					if adapterResult.Success {
+						fmt.Printf("\n✓ %s\n", adapterResult.AdapterName)
+						fmt.Printf("  Events created: %d\n", adapterResult.EventsCreated)
+						fmt.Printf("  Events updated: %d\n", adapterResult.EventsUpdated)
+						fmt.Printf("  Persons created: %d\n", adapterResult.PersonsCreated)
+						fmt.Printf("  Duration: %s\n", adapterResult.Duration)
+					} else {
+						fmt.Printf("\n✗ %s\n", adapterResult.AdapterName)
+						fmt.Printf("  Error: %s\n", adapterResult.Error)
+					}
+				}
+
+				// If any adapter failed, exit with error code
+				if !syncResult.OK {
+					os.Exit(1)
+				}
+			}
+		},
+	}
+	syncCmd.Flags().String("adapter", "", "Sync specific adapter (e.g., imessage, gmail)")
+	syncCmd.Flags().Bool("full", false, "Force full re-sync instead of incremental")
+	rootCmd.AddCommand(syncCmd)
+
 	// TODO: Add more commands as per PRD
-	// - sync
 	// - events
 	// - people
 	// - timeline
