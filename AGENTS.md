@@ -78,8 +78,9 @@ if jsonOutput {
        Sync(ctx context.Context, db *sql.DB, full bool) (SyncResult, error)
    }
    ```
-3. Register in adapter factory
-4. Add `comms connect <name>` support
+3. Add `comms connect <name>` command in main.go
+4. Store config in config.yaml via `config.Load()` and `cfg.Save()`
+5. Add status check in `checkAdapterStatus()` function
 
 ### Running tests
 
@@ -107,6 +108,9 @@ make build
 - Use transactions when performing multiple related database operations
 - UUIDs from google/uuid package for generating IDs
 - Always defer tx.Rollback() after beginning a transaction (safe even if committed)
+- Adapter configuration is stored in config.yaml and persisted via config.Save()
+- Use os.Stat() to check if external files/databases exist before configuring adapters
+- Provide helpful error messages with setup instructions when prerequisites are missing
 
 ## Schema Quick Reference
 

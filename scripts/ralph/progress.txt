@@ -76,3 +76,53 @@ Project: comms — Unified Communications Cartographer
   - Using INTEGER for timestamps (Unix epoch) for efficiency
 
 ---
+
+## 2026-01-11 - US-004 Me command to configure user identity
+- Created internal/me package with identity management functions
+- Implemented `comms me set` command with --name, --phone, --email flags
+- Implemented `comms me show` command to display current identity
+- Ensures only one person can have is_me=1 in the database
+- Supports JSON output via --json flag
+- **Files changed:**
+  - internal/me/me.go (new)
+  - cmd/comms/main.go (added me command with set/show subcommands)
+  - AGENTS.md (updated with transaction patterns and gotchas)
+- **Learnings:**
+  - Transaction pattern: Begin transaction, defer Rollback (safe even if committed), then Commit at end
+  - Use sql.NullString for nullable database fields (display_name, relationship_type)
+  - google/uuid package for generating unique IDs (already in go.mod as indirect dependency)
+  - Commands should validate input early (e.g., require at least one flag)
+  - When checking for existing rows, use sql.ErrNoRows to distinguish "not found" from other errors
+  - Identity conflicts should be detected and reported clearly (e.g., identifier already belongs to another person)
+  - SetMeName handles both create (if no me person exists) and update (if exists) cases
+  - AddIdentity creates me person with empty name if needed (name can be set later)
+  - Use time.Now().Unix() for storing timestamps as INTEGER in SQLite
+  - Result structs with OK bool and optional fields work well for both JSON and text output
+  - Text output uses ✓ checkmark for success messages (user-friendly)
+
+---
+## 2026-01-11 - US-005 Adapters command to list and manage adapters
+- Created internal/adapters package with Adapter interface (Name(), Sync())
+- Implemented `comms adapters` command to list configured adapters with status
+- Implemented `comms connect imessage` to configure iMessage adapter (via Eve)
+- Implemented `comms connect gmail --account <email>` to configure Gmail adapter (via gogcli)
+- Adapter status checks verify prerequisites (Eve db exists, gmail account configured)
+- Config.yaml stores adapter configuration (type, enabled, options)
+- All commands support --json flag for structured output
+- **Files changed:**
+  - internal/adapters/adapter.go (new)
+  - cmd/comms/main.go (added adapters, connect commands)
+  - AGENTS.md (updated with adapter patterns)
+- **Learnings:**
+  - Config package already had AdapterConfig struct with type, enabled, and options map
+  - Use config.Load() and cfg.Save() to read/write YAML config
+  - os.Stat() checks file existence; os.IsNotExist(err) distinguishes "not found" errors
+  - Provide helpful error messages with setup instructions when prerequisites missing
+  - checkAdapterStatus() function centralizes prerequisite validation logic
+  - Adapter interface defines contract: Name() and Sync(ctx, db, full) methods
+  - SyncResult struct tracks EventsCreated, EventsUpdated, PersonsCreated, Duration
+  - Eve database location: ~/Library/Application Support/Eve/eve.db
+  - Gmail adapter stores account email in Options map for later use by sync
+
+---
+

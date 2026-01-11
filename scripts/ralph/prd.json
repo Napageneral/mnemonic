@@ -59,8 +59,8 @@
         "Only one person can have is_me=true"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Transaction-based implementation with JSON output support"
     },
     {
       "id": "US-005",
@@ -73,7 +73,7 @@
         "JSON output support"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Adapters: imessage (eve), gmail (gogcli), cursor (aix)"
     },
     {
