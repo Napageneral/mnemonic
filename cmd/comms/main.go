@@ -9,6 +9,7 @@ import (
 	"github.com/Napageneral/comms/internal/db"
 	"github.com/Napageneral/comms/internal/me"
 	"github.com/spf13/cobra"
+	"path/filepath"
 )
 
 var (
@@ -378,9 +379,268 @@ queryable event store with identity resolution.`,
 	meCmd.AddCommand(meShowCmd)
 	rootCmd.AddCommand(meCmd)
 
+	// adapters command
+	adaptersCmd := &cobra.Command{
+		Use:   "adapters",
+		Short: "List configured adapters",
+		Run: func(cmd *cobra.Command, args []string) {
+			type AdapterInfo struct {
+				Name    string `json:"name"`
+				Type    string `json:"type"`
+				Enabled bool   `json:"enabled"`
+				Status  string `json:"status"`
+			}
+
+			type Result struct {
+				OK       bool          `json:"ok"`
+				Message  string        `json:"message,omitempty"`
+				Adapters []AdapterInfo `json:"adapters,omitempty"`
+			}
+
+			cfg, err := config.Load()
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to load config: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{OK: true}
+
+			if len(cfg.Adapters) == 0 {
+				result.Message = "No adapters configured. Run 'comms connect <adapter>' to configure one."
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Println(result.Message)
+				}
+				return
+			}
+
+			// Determine adapter status based on enabled flag and prerequisites
+			for name, adapter := range cfg.Adapters {
+				status := "disabled"
+				if adapter.Enabled {
+					status = checkAdapterStatus(name, adapter)
+				}
+
+				result.Adapters = append(result.Adapters, AdapterInfo{
+					Name:    name,
+					Type:    adapter.Type,
+					Enabled: adapter.Enabled,
+					Status:  status,
+				})
+			}
+
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Println("Configured adapters:")
+				for _, a := range result.Adapters {
+					statusSymbol := "✗"
+					if a.Status == "ready" {
+						statusSymbol = "✓"
+					}
+					enabledStr := "disabled"
+					if a.Enabled {
+						enabledStr = "enabled"
+					}
+					fmt.Printf("  %s %s (%s) - %s - %s\n", statusSymbol, a.Name, a.Type, enabledStr, a.Status)
+				}
+			}
+		},
+	}
+	rootCmd.AddCommand(adaptersCmd)
+
+	// connect command
+	connectCmd := &cobra.Command{
+		Use:   "connect",
+		Short: "Configure an adapter",
+		Long:  "Configure and enable an adapter for syncing communications",
+	}
+
+	// connect imessage
+	connectImessageCmd := &cobra.Command{
+		Use:   "imessage",
+		Short: "Configure iMessage adapter (via Eve)",
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK      bool   `json:"ok"`
+				Message string `json:"message,omitempty"`
+			}
+
+			// Check if Eve database exists
+			home, err := os.UserHomeDir()
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to get home directory: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			eveDBPath := filepath.Join(home, "Library", "Application Support", "Eve", "eve.db")
+			if _, err := os.Stat(eveDBPath); os.IsNotExist(err) {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Eve database not found at %s. Install and run Eve first: brew install Napageneral/tap/eve && eve init && eve sync", eveDBPath),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n\n", result.Message)
+					fmt.Fprintf(os.Stderr, "To fix this:\n")
+					fmt.Fprintf(os.Stderr, "  1. Install Eve: brew install Napageneral/tap/eve\n")
+					fmt.Fprintf(os.Stderr, "  2. Initialize Eve: eve init\n")
+					fmt.Fprintf(os.Stderr, "  3. Sync Eve: eve sync\n")
+				}
+				os.Exit(1)
+			}
+
+			cfg, err := config.Load()
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to load config: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			cfg.Adapters["imessage"] = config.AdapterConfig{
+				Type:    "eve",
+				Enabled: true,
+			}
+
+			if err := cfg.Save(); err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to save config: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{
+				OK:      true,
+				Message: "iMessage adapter configured successfully",
+			}
+
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Println("✓ iMessage adapter configured")
+				fmt.Printf("  Eve database: %s\n", eveDBPath)
+				fmt.Println("\nRun 'comms sync' to sync iMessage events")
+			}
+		},
+	}
+
+	// connect gmail
+	connectGmailCmd := &cobra.Command{
+		Use:   "gmail",
+		Short: "Configure Gmail adapter (via gogcli)",
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK      bool   `json:"ok"`
+				Message string `json:"message,omitempty"`
+			}
+
+			account, _ := cmd.Flags().GetString("account")
+			if account == "" {
+				result := Result{
+					OK:      false,
+					Message: "The --account flag is required (e.g., --account user@gmail.com)",
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			// TODO: Check if gogcli is installed and authenticated
+			// For now, just add the config
+
+			cfg, err := config.Load()
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to load config: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			cfg.Adapters["gmail"] = config.AdapterConfig{
+				Type:    "gogcli",
+				Enabled: true,
+				Options: map[string]interface{}{
+					"account": account,
+				},
+			}
+
+			if err := cfg.Save(); err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to save config: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{
+				OK:      true,
+				Message: "Gmail adapter configured successfully",
+			}
+
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Println("✓ Gmail adapter configured")
+				fmt.Printf("  Account: %s\n", account)
+				fmt.Println("\nNote: Ensure gogcli is installed and authenticated:")
+				fmt.Println("  brew install steipete/tap/gogcli")
+				fmt.Printf("  gog auth add %s\n", account)
+				fmt.Println("\nRun 'comms sync' to sync Gmail events")
+			}
+		},
+	}
+	connectGmailCmd.Flags().String("account", "", "Gmail account email address")
+
+	connectCmd.AddCommand(connectImessageCmd)
+	connectCmd.AddCommand(connectGmailCmd)
+	rootCmd.AddCommand(connectCmd)
+
 	// TODO: Add more commands as per PRD
-	// - connect
-	// - adapters
 	// - sync
 	// - events
 	// - people
@@ -398,4 +658,33 @@ func printJSON(v interface{}) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	enc.Encode(v)
+}
+
+// checkAdapterStatus checks if an adapter's prerequisites are met
+func checkAdapterStatus(name string, adapter config.AdapterConfig) string {
+	switch adapter.Type {
+	case "eve":
+		// Check if Eve database exists
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "error"
+		}
+		eveDBPath := filepath.Join(home, "Library", "Application Support", "Eve", "eve.db")
+		if _, err := os.Stat(eveDBPath); os.IsNotExist(err) {
+			return "missing Eve database"
+		}
+		return "ready"
+
+	case "gogcli":
+		// Check if account is configured
+		if account, ok := adapter.Options["account"].(string); ok && account != "" {
+			// TODO: Check if gogcli is installed and authenticated
+			// For now, assume ready if account is configured
+			return "ready (check gogcli auth)"
+		}
+		return "missing account"
+
+	default:
+		return "unknown adapter type"
+	}
 }
