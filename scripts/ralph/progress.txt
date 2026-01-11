@@ -24,6 +24,10 @@ Project: comms — Unified Communications Cartographer
 - Bulk operations: Reuse filter patterns across commands (EventFilter for both query and tag)
 - DB query: Default read-only (SELECT only), use --write flag for mutations (INSERT/UPDATE/DELETE)
 - Dynamic SQL results: Use []map[string]interface{} with rows.Columns() for flexible schema handling
+- External commands: Use exec.LookPath() to validate availability, exec.CommandContext() for execution
+- Gmail sync: Use 'after:YYYY/MM/DD' query format, timestamps in milliseconds (divide by 1000)
+- Email parsing: Handle "Name <email>" format by extracting text between < and >
+- Type assertions: Use two-value ok pattern when reading map[string]interface{}
 
 ## Key Files
 - cmd/comms/main.go — CLI entry point
@@ -355,3 +359,38 @@ Project: comms — Unified Communications Cartographer
   - Safety-first approach: Require explicit --write flag for mutations prevents accidents
   - Error handling at each step: db open, query execution, column retrieval, row scanning
   - defer rows.Close() and defer database.Close() ensure cleanup even on errors
+
+---
+
+## 2026-01-11 - US-014 Gmail adapter pulls events from gogcli
+- Created internal/adapters/gmail.go implementing Adapter interface
+- Syncs Gmail threads and messages via gogcli command-line tool
+- Maps Gmail messages to comms events with proper threading via thread_id
+- Extracts participants from to/from/cc headers and creates persons/identities
+- Supports incremental sync using 'after:YYYY/MM/DD' query syntax
+- Determines message direction via SENT label in labelIds array
+- Added Gmail adapter to sync orchestration in internal/sync/sync.go
+- **Files changed:**
+  - internal/adapters/gmail.go (new)
+  - internal/sync/sync.go (added Gmail adapter case)
+  - AGENTS.md (added Gmail adapter patterns)
+  - scripts/ralph/prd.json (marked US-014 as passing)
+- **Learnings:**
+  - exec.LookPath() validates command availability before creating adapter
+  - gogcli called via exec.CommandContext with --json flag for structured output
+  - Gmail search query uses 'after:YYYY/MM/DD' format for date-based filtering
+  - Gmail API returns timestamps in milliseconds, must divide by 1000 for Unix seconds
+  - Email address parsing handles both "Name <email>" and plain "email" formats using string manipulation
+  - Gmail threads contain array of messages, each message becomes separate event
+  - Direction determined by checking if "SENT" exists in message.LabelIDs array
+  - Body extraction recursively searches payload.Parts for text/plain or text/html MIME types
+  - Attachments detected by checking payload.Filename field recursively through parts
+  - Email addresses stored as identities with channel='email' for person resolution
+  - Type assertions required when reading config.Options map[string]interface{} - use two-value ok pattern
+  - Headers stored in array format, converted to map[string]string for easy access
+  - Subject included in event content along with body text
+  - Participant roles: sender (from), recipient (to), cc (cc field)
+  - getOrCreatePersonByEmail handles identity lookup and person creation atomically
+  - Warning messages printed for individual thread failures, but sync continues for other threads
+  - content_types array includes "attachment" when hasAttachments returns true
+  - Email used as canonical_name for new persons (user can update with display name later)

@@ -207,8 +207,8 @@
         "Tracks sync watermark (last sync date)"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": "Requires gogcli authenticated. Parse JSON output."
+      "passes": true,
+      "notes": "Implemented. Calls gogcli with --json flag, parses threads and messages, creates identities with channel='email'."
     },
     {
       "id": "US-015",
