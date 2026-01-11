@@ -59,3 +59,20 @@ Project: comms — Unified Communications Cartographer
   - os.MkdirAll is idempotent (safe to create existing directories)
 
 ---
+
+## 2026-01-11 - US-003 Database schema for events, persons, identities
+- Schema was already created as part of US-002 implementation
+- All tables present: events, persons, identities, event_participants, tags
+- Schema versioning supported via schema_version table
+- Indexes created on timestamp, channel, person_id, and other key fields
+- Foreign key constraints with ON DELETE CASCADE for referential integrity
+- **Files changed:**
+  - None (already complete from US-002)
+- **Learnings:**
+  - Schema design supports union-find identity resolution via persons/identities
+  - event_participants uses composite primary key for many-to-many relationships
+  - tags table supports both user-applied and AI-discovered tags with confidence scores
+  - sync_watermarks table enables incremental sync per adapter
+  - Using INTEGER for timestamps (Unix epoch) for efficiency
+
+---

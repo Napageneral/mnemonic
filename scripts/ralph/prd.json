@@ -45,8 +45,8 @@
         "Schema versioning/migrations support"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "Schema in internal/db/schema.sql, migrations in internal/db/migrations/"
+      "passes": true,
+      "notes": "Schema in internal/db/schema.sql, completed in US-002"
     },
     {
       "id": "US-004",
