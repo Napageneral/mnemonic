@@ -266,3 +266,28 @@ Project: comms — Unified Communications Cartographer
   - Display name formatting: show [display_name] if different from canonical_name
   - Event statistics add context: show event count and last event timestamp in listings
   - Consistent Result struct pattern works well across all commands
+
+---
+
+## 2026-01-11 - US-011 Timeline command for temporal view
+- Created internal/timeline package with QueryTimeline function
+- Implemented `comms timeline` command with flexible date parsing (YYYY, YYYY-MM, YYYY-MM-DD)
+- Added `--today` and `--week` convenience flags for common use cases
+- Timeline aggregates events by date with breakdowns by sender, channel, and direction
+- Both JSON and text output modes with emoji calendar icons for visual appeal
+- **Files changed:**
+  - internal/timeline/timeline.go (new)
+  - cmd/comms/main.go (added timeline command)
+  - AGENTS.md (added timeline patterns)
+  - scripts/ralph/prd.json (marked US-011 as passing)
+- **Learnings:**
+  - SQLite DATE() function with 'unixepoch' and 'localtime' modifiers groups timestamps by day
+  - Flexible date parsing: Try multiple time.Parse layouts in sequence (YYYY-MM-DD, YYYY-MM, YYYY)
+  - Time range boundaries: Use time.Date() with AddDate() for precise start/end (exclusive end)
+  - Week calculation: Convert Sunday from 0 to 7, then subtract (weekday-1) to find Monday
+  - Map-based aggregation: Use map[string]int for counting by sender/channel/direction
+  - Two-pass query pattern: First pass for detailed breakdown, second pass for accurate totals
+  - Avoid shadowing err variable in if statements - declare once at function level or use := each time
+  - cobra.MaximumNArgs(1) allows optional positional argument (0 or 1)
+  - Flag precedence: Check --today, then --week, then positional arg for flexible UX
+  - Empty results handling: Show helpful "No events found" message instead of empty output

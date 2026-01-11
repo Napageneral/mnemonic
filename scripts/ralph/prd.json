@@ -164,8 +164,8 @@
         "JSON output"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented with internal/timeline package. Supports flexible date parsing (YYYY, YYYY-MM, YYYY-MM-DD) and aggregates by sender/channel/direction."
     },
     {
       "id": "US-012",
