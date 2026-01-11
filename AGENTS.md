@@ -99,6 +99,25 @@ comms sync --full
 comms sync --json
 ```
 
+### Adding tags
+
+```bash
+# List all tags
+comms tag list
+
+# Filter tags by type
+comms tag list --type project
+
+# Tag a specific event
+comms tag add --event <event-id> --tag project:htaa
+
+# Bulk tag events by person
+comms tag add --person "Dane" --tag context:business
+
+# Bulk tag with multiple filters
+comms tag add --channel imessage --since 2026-01-01 --tag topic:planning
+```
+
 ### Running tests
 
 ```bash
@@ -157,6 +176,12 @@ make build
 - Week range: Calculate Monday of current week (Sunday = 7 for weekday calculation)
 - Timeline aggregation: Group events by date, then by sender/channel/direction for statistics
 - Map data structures for timeline stats enable easy aggregation and display
+- Tag types are enumerated: topic, entity, emotion, project, context
+- Tags use format 'type:value' (e.g., 'project:htaa', 'context:business')
+- Bulk tagging uses same filter pattern as events query (person, channel, since, until)
+- Tags can have confidence scores for analysis-discovered tags (0.0-1.0)
+- Tag source tracks origin: 'user' for manual tags, 'analysis' for AI-discovered tags
+- Duplicate tag detection prevents same tag being added to same event multiple times
 
 ## Schema Quick Reference
 

@@ -15,6 +15,7 @@ import (
 	"github.com/Napageneral/comms/internal/me"
 	"github.com/Napageneral/comms/internal/query"
 	"github.com/Napageneral/comms/internal/sync"
+	"github.com/Napageneral/comms/internal/tag"
 	"github.com/Napageneral/comms/internal/timeline"
 	"github.com/spf13/cobra"
 )
@@ -1839,8 +1840,363 @@ Examples:
 	timelineCmd.Flags().Bool("week", false, "Show this week's events")
 	rootCmd.AddCommand(timelineCmd)
 
+	// tag command
+	tagCmd := &cobra.Command{
+		Use:   "tag",
+		Short: "Manage event tags",
+		Long:  "Apply and manage soft tags on events for categorization and discovery",
+	}
+
+	// tag list command
+	tagListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all tags",
+		Long:  "List all tags or filter by type",
+		Run: func(cmd *cobra.Command, args []string) {
+			type TagInfo struct {
+				ID             string   `json:"id"`
+				EventID        string   `json:"event_id"`
+				TagType        string   `json:"tag_type"`
+				Value          string   `json:"value"`
+				Confidence     *float64 `json:"confidence,omitempty"`
+				Source         string   `json:"source"`
+				EventTimestamp int64    `json:"event_timestamp,omitempty"`
+				EventChannel   string   `json:"event_channel,omitempty"`
+			}
+
+			type Result struct {
+				OK      bool      `json:"ok"`
+				Message string    `json:"message,omitempty"`
+				Count   int       `json:"count"`
+				Tags    []TagInfo `json:"tags,omitempty"`
+			}
+
+			// Open database
+			database, err := db.Open()
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to open database: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Get filter flags
+			tagType, _ := cmd.Flags().GetString("type")
+
+			var tags []tag.TagWithEvent
+			if tagType != "" {
+				tags, err = tag.ListByType(database, tagType)
+			} else {
+				tags, err = tag.ListAll(database)
+			}
+
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to list tags: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{
+				OK:    true,
+				Count: len(tags),
+			}
+
+			// Convert to result format
+			for _, t := range tags {
+				tagInfo := TagInfo{
+					ID:             t.ID,
+					EventID:        t.EventID,
+					TagType:        t.TagType,
+					Value:          t.Value,
+					Confidence:     t.Confidence,
+					Source:         t.Source,
+					EventTimestamp: t.EventTimestamp,
+					EventChannel:   t.EventChannel,
+				}
+				result.Tags = append(result.Tags, tagInfo)
+			}
+
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				if len(tags) == 0 {
+					fmt.Println("No tags found")
+					return
+				}
+
+				if tagType != "" {
+					fmt.Printf("Tags of type '%s' (%d total):\n\n", tagType, len(tags))
+				} else {
+					fmt.Printf("All tags (%d total):\n\n", len(tags))
+				}
+
+				for _, t := range tags {
+					fmt.Printf("• %s:%s\n", t.TagType, t.Value)
+					fmt.Printf("  ID: %s\n", t.ID)
+					fmt.Printf("  Event: %s (%s)\n", t.EventID, t.EventChannel)
+					fmt.Printf("  Source: %s\n", t.Source)
+					if t.Confidence != nil {
+						fmt.Printf("  Confidence: %.2f\n", *t.Confidence)
+					}
+					// Show event content preview
+					if t.EventContent != "" {
+						content := t.EventContent
+						if len(content) > 100 {
+							content = content[:100] + "..."
+						}
+						fmt.Printf("  Event content: %s\n", content)
+					}
+					fmt.Println()
+				}
+			}
+		},
+	}
+
+	tagListCmd.Flags().String("type", "", "Filter by tag type (topic, entity, emotion, project, context)")
+
+	// tag add command
+	tagAddCmd := &cobra.Command{
+		Use:   "add",
+		Short: "Add tags to events",
+		Long: `Add a tag to a specific event or multiple events matching a filter.
+
+Examples:
+  # Tag a specific event
+  comms tag add --event abc123 --tag project:htaa
+
+  # Bulk tag events by person
+  comms tag add --person "Dane" --tag context:business
+
+  # Bulk tag events by channel and time
+  comms tag add --channel imessage --since 2026-01-01 --tag topic:planning`,
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK            bool   `json:"ok"`
+				Message       string `json:"message,omitempty"`
+				EventsTagged  int    `json:"events_tagged,omitempty"`
+			}
+
+			// Parse flags
+			eventID, _ := cmd.Flags().GetString("event")
+			tagStr, _ := cmd.Flags().GetString("tag")
+			personName, _ := cmd.Flags().GetString("person")
+			channel, _ := cmd.Flags().GetString("channel")
+			sinceStr, _ := cmd.Flags().GetString("since")
+			untilStr, _ := cmd.Flags().GetString("until")
+			confidenceVal, _ := cmd.Flags().GetFloat64("confidence")
+
+			// Validate required flags
+			if tagStr == "" {
+				result := Result{
+					OK:      false,
+					Message: "The --tag flag is required",
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			// Parse tag (format: type:value)
+			parts := strings.SplitN(tagStr, ":", 2)
+			if len(parts) != 2 {
+				result := Result{
+					OK:      false,
+					Message: "Tag must be in format 'type:value' (e.g., 'project:htaa')",
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			tagType, tagValue := parts[0], parts[1]
+
+			// Determine mode: single event or bulk
+			if eventID == "" && personName == "" && channel == "" && sinceStr == "" && untilStr == "" {
+				result := Result{
+					OK:      false,
+					Message: "Either --event or at least one filter (--person, --channel, --since, --until) must be provided",
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			// Open database
+			database, err := db.Open()
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to open database: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Handle confidence
+			var confidence *float64
+			if confidenceVal > 0 {
+				confidence = &confidenceVal
+			}
+
+			// Single event mode
+			if eventID != "" {
+				err = tag.Add(database, eventID, tagType, tagValue, confidence, "user")
+				if err != nil {
+					result := Result{
+						OK:      false,
+						Message: fmt.Sprintf("Failed to add tag: %v", err),
+					}
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+
+				result := Result{
+					OK:           true,
+					Message:      fmt.Sprintf("Tag '%s:%s' added to event %s", tagType, tagValue, eventID),
+					EventsTagged: 1,
+				}
+
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Printf("✓ Added tag '%s:%s' to event %s\n", tagType, tagValue, eventID)
+				}
+				return
+			}
+
+			// Bulk mode - build filter
+			filter := tag.EventFilter{
+				PersonName: personName,
+				Channel:    channel,
+			}
+
+			// Parse dates
+			if sinceStr != "" {
+				since, err := parseDate(sinceStr)
+				if err != nil {
+					result := Result{
+						OK:      false,
+						Message: fmt.Sprintf("Invalid since date: %v. Use format YYYY-MM-DD", err),
+					}
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+				filter.Since = &since
+			}
+
+			if untilStr != "" {
+				until, err := parseDate(untilStr)
+				if err != nil {
+					result := Result{
+						OK:      false,
+						Message: fmt.Sprintf("Invalid until date: %v. Use format YYYY-MM-DD", err),
+					}
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+				filter.Until = &until
+			}
+
+			// Add tags in bulk
+			tagged, err := tag.AddBulk(database, filter, tagType, tagValue, confidence, "user")
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to add tags: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{
+				OK:           true,
+				Message:      fmt.Sprintf("Tag '%s:%s' added to %d event(s)", tagType, tagValue, tagged),
+				EventsTagged: tagged,
+			}
+
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Printf("✓ Added tag '%s:%s' to %d event(s)\n", tagType, tagValue, tagged)
+
+				// Show filter description
+				filterParts := []string{}
+				if personName != "" {
+					filterParts = append(filterParts, fmt.Sprintf("person: %s", personName))
+				}
+				if channel != "" {
+					filterParts = append(filterParts, fmt.Sprintf("channel: %s", channel))
+				}
+				if sinceStr != "" {
+					filterParts = append(filterParts, fmt.Sprintf("since: %s", sinceStr))
+				}
+				if untilStr != "" {
+					filterParts = append(filterParts, fmt.Sprintf("until: %s", untilStr))
+				}
+
+				if len(filterParts) > 0 {
+					fmt.Printf("  Filter: %s\n", strings.Join(filterParts, ", "))
+				}
+			}
+		},
+	}
+
+	tagAddCmd.Flags().String("event", "", "Event ID to tag")
+	tagAddCmd.Flags().String("tag", "", "Tag in format 'type:value' (e.g., 'project:htaa')")
+	tagAddCmd.Flags().String("person", "", "Filter events by person name (bulk mode)")
+	tagAddCmd.Flags().String("channel", "", "Filter events by channel (bulk mode)")
+	tagAddCmd.Flags().String("since", "", "Filter events since date YYYY-MM-DD (bulk mode)")
+	tagAddCmd.Flags().String("until", "", "Filter events until date YYYY-MM-DD (bulk mode)")
+	tagAddCmd.Flags().Float64("confidence", 0, "Confidence score (0.0-1.0) for analysis-discovered tags")
+
+	tagCmd.AddCommand(tagListCmd)
+	tagCmd.AddCommand(tagAddCmd)
+	rootCmd.AddCommand(tagCmd)
+
 	// TODO: Add more commands as per PRD
-	// - tag
 	// - db
 
 	if err := rootCmd.Execute(); err != nil {
