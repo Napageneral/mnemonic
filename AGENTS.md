@@ -111,6 +111,10 @@ make build
 - Adapter configuration is stored in config.yaml and persisted via config.Save()
 - Use os.Stat() to check if external files/databases exist before configuring adapters
 - Provide helpful error messages with setup instructions when prerequisites are missing
+- When opening external databases (like Eve), use read-only mode: `file:path?mode=ro`
+- Eve schema: contacts/contact_identifiers for people, messages/chats for events
+- Use `ON CONFLICT DO UPDATE` for upsert operations in SQLite
+- Sync watermarks enable incremental sync by tracking last_sync_at timestamp per adapter
 
 ## Schema Quick Reference
 
