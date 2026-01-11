@@ -88,7 +88,7 @@
         "Direction: is_from_me -> sent, else received"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Eve db at ~/Library/Application Support/Eve/eve.db"
     },
     {

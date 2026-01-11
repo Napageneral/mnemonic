@@ -10,12 +10,16 @@ Project: comms — Unified Communications Cartographer
 - Data: SQLite in ~/Library/Application Support/Comms/comms.db
 - JSON output: All commands support --json flag via Result struct
 - Errors: Return structured errors with ok: false in JSON mode
-- Adapters: Each adapter implements Adapter interface
+- Adapters: Each adapter implements Adapter interface (Name(), Sync(ctx, db, full))
 - Eve DB path: ~/Library/Application Support/Eve/eve.db
 - gogcli: Call via exec, parse JSON output
 - Schema: Use //go:embed to embed schema.sql into binary
 - XDG paths: config.GetConfigDir() and config.GetDataDir() handle platform differences
 - Foreign keys: Must enable PRAGMA foreign_keys = ON for each connection
+- Read-only DB access: `sql.Open("sqlite", "file:path?mode=ro")`
+- Upserts: Use `ON CONFLICT(...) DO UPDATE SET ...` for idempotent inserts
+- Sync watermarks: Track last_sync_at per adapter in sync_watermarks table for incremental sync
+- Identity resolution: Map external IDs via identities table (channel+identifier -> person_id)
 
 ## Key Files
 - cmd/comms/main.go — CLI entry point
@@ -126,3 +130,32 @@ Project: comms — Unified Communications Cartographer
 
 ---
 
+
+---
+
+## 2026-01-11 - US-006 Eve adapter pulls events from Eve database
+- Created internal/adapters/eve.go implementing the Adapter interface
+- Syncs Eve contacts to comms persons and identities tables
+- Syncs Eve messages to comms events with proper threading via chat_identifier
+- Maps is_from_me boolean to direction field (sent/received)
+- Tracks sync watermark in sync_watermarks table for incremental sync
+- Handles attachments by checking attachment count and adding to content_types
+- Links event_participants via identity resolution (matching contact_identifiers to identities)
+- Opens Eve database in read-only mode using file:path?mode=ro
+- **Files changed:**
+  - internal/adapters/eve.go (new)
+  - AGENTS.md (added Eve adapter patterns)
+- **Learnings:**
+  - Eve schema: contacts/contact_identifiers for people, messages/chats/attachments for events
+  - Use `ON CONFLICT(source_adapter, source_id) DO UPDATE` for upsert operations
+  - Read-only database access: `sql.Open("sqlite", "file:path?mode=ro")`
+  - Sync watermarks enable incremental sync by storing last_sync_at timestamp per adapter
+  - Query Eve messages with timestamp filter for incremental sync: `WHERE m.timestamp > ?`
+  - Handle nullable fields with sql.NullString and sql.NullInt64
+  - Map Eve sender_id to comms person_id via contact_identifiers -> identities lookup
+  - Content types are JSON arrays: ["text"], ["text", "attachment"]
+  - Thread IDs map to Eve's chat_identifier for conversation grouping
+  - Event participants need role: sender, recipient, cc, observer
+  - When checking if insert vs update happened, query back the ID after ON CONFLICT
+  - NewEveAdapter() constructor validates Eve database exists before creating adapter
+  - Adapter returns SyncResult with counts: EventsCreated, EventsUpdated, PersonsCreated, Duration
