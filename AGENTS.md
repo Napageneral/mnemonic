@@ -75,6 +75,10 @@ make build
 - Eve's `eve.db` is the warehouse, `eve-queue.db` is the job queue — we only read `eve.db`
 - gogcli requires authentication first: `gog auth add email@example.com`
 - Identity merging is destructive — updates all event_participants references
+- Use `//go:embed` directive to embed schema.sql into the binary
+- SQLite PRAGMA foreign_keys must be enabled on each connection
+- XDG_CONFIG_HOME defaults to ~/.config, XDG_DATA_HOME defaults to ~/.local/share on Linux
+- macOS uses ~/Library/Application Support instead of XDG for data
 
 ## Schema Quick Reference
 

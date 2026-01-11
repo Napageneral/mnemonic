@@ -19,7 +19,7 @@
       "notes": "Use modernc.org/sqlite for pure-Go SQLite"
     },
     {
-      "id": "US-002", 
+      "id": "US-002",
       "title": "Init command creates config and database",
       "acceptanceCriteria": [
         "comms init creates ~/.config/comms/",
@@ -29,7 +29,7 @@
         "JSON output shows paths created"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "XDG-compliant paths"
     },
     {

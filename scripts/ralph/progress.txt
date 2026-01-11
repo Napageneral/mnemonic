@@ -6,18 +6,56 @@ Project: comms — Unified Communications Cartographer
 <!-- Add reusable patterns here as you discover them -->
 
 - SQLite: Use modernc.org/sqlite (pure Go, no CGO)
-- Config: YAML in ~/.config/comms/config.yaml
+- Config: YAML in ~/.config/comms/config.yaml (use internal/config package)
 - Data: SQLite in ~/Library/Application Support/Comms/comms.db
-- JSON output: All commands support --json flag
+- JSON output: All commands support --json flag via Result struct
 - Errors: Return structured errors with ok: false in JSON mode
 - Adapters: Each adapter implements Adapter interface
 - Eve DB path: ~/Library/Application Support/Eve/eve.db
 - gogcli: Call via exec, parse JSON output
+- Schema: Use //go:embed to embed schema.sql into binary
+- XDG paths: config.GetConfigDir() and config.GetDataDir() handle platform differences
+- Foreign keys: Must enable PRAGMA foreign_keys = ON for each connection
 
 ## Key Files
 - cmd/comms/main.go — CLI entry point
+- internal/config/config.go — Config management (XDG-compliant)
 - internal/db/schema.sql — Database schema
 - internal/db/db.go — Database connection
 - internal/adapters/*.go — Channel adapters
+
+---
+
+## 2026-01-11 - US-001 Project scaffolding
+- Project was already complete with go.mod, Makefile, .goreleaser.yaml, and cobra CLI
+- Version command works with both text and JSON output
+- Build succeeds without errors
+- **Learnings:**
+  - Makefile uses ldflags to inject version, commit, and build date
+  - .goreleaser.yaml configured for darwin and linux on amd64/arm64
+  - Cobra provides clean command structure with persistent flags
+
+---
+
+## 2026-01-11 - US-002 Init command creates config and database
+- Created internal/config package with XDG-compliant path functions
+- Created internal/db package with schema.sql embedded via //go:embed
+- Added init command that creates directories and initializes database
+- Init command is idempotent (safe to run multiple times)
+- JSON output includes config_dir, data_dir, and db_path
+- **Files changed:**
+  - internal/config/config.go (new)
+  - internal/db/db.go (new)
+  - internal/db/schema.sql (new)
+  - cmd/comms/main.go (added init command)
+  - go.mod/go.sum (added modernc.org/sqlite, gopkg.in/yaml.v3)
+- **Learnings:**
+  - Use //go:embed directive to bundle schema.sql into binary
+  - XDG_CONFIG_HOME defaults to ~/.config on Unix-like systems
+  - macOS uses ~/Library/Application Support for data, not XDG paths
+  - SQLite PRAGMA foreign_keys must be explicitly enabled per connection
+  - modernc.org/sqlite is pure Go (no CGO), perfect for cross-platform builds
+  - Result structs with OK bool and optional fields work well for JSON output
+  - os.MkdirAll is idempotent (safe to create existing directories)
 
 ---
