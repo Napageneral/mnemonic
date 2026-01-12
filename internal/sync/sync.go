@@ -18,6 +18,7 @@ type AdapterResult struct {
 	EventsUpdated  int    `json:"events_updated"`
 	PersonsCreated int    `json:"persons_created"`
 	Duration       string `json:"duration"`
+	Perf           map[string]string `json:"perf,omitempty"`
 }
 
 // SyncResult contains the results of syncing all adapters
@@ -147,6 +148,18 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 			return result
 		}
 
+	case "bird":
+		// X/Twitter adapter via bird CLI
+		username := ""
+		if usernameVal, ok := cfg.Options["username"]; ok {
+			username, _ = usernameVal.(string)
+		}
+		adapter, err = adapters.NewBirdAdapter(username)
+		if err != nil {
+			result.Error = fmt.Sprintf("Failed to create adapter: %v", err)
+			return result
+		}
+
 	default:
 		result.Error = fmt.Sprintf("Unknown adapter type: %s", cfg.Type)
 		return result
@@ -165,6 +178,7 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 	result.EventsUpdated = syncResult.EventsUpdated
 	result.PersonsCreated = syncResult.PersonsCreated
 	result.Duration = syncResult.Duration.String()
+	result.Perf = syncResult.Perf
 
 	return result
 }

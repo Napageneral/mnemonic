@@ -128,6 +128,21 @@ Connect:
 comms connect cursor
 ```
 
+### X/Twitter (via bird)
+
+Prerequisites:
+```bash
+brew install steipete/tap/bird
+bird check  # Verify auth via Chrome cookies
+```
+
+Connect:
+```bash
+comms connect x
+```
+
+Syncs: bookmarks, likes, mentions
+
 ## Output Formats
 
 All commands support `--json` / `-j`:

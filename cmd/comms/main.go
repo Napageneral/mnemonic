@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -727,6 +728,67 @@ queryable event store with identity resolution.`,
 	}
 
 	connectCmd.AddCommand(connectCursorCmd)
+
+	// connect x (via bird)
+	connectXCmd := &cobra.Command{
+		Use:   "x",
+		Short: "Configure X/Twitter adapter (via bird CLI)",
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK      bool   `json:"ok"`
+				Message string `json:"message,omitempty"`
+			}
+
+			cfg, err := config.Load()
+			if err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to load config: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			cfg.Adapters["x"] = config.AdapterConfig{
+				Type:    "bird",
+				Enabled: true,
+				Options: map[string]interface{}{},
+			}
+
+			if err := cfg.Save(); err != nil {
+				result := Result{
+					OK:      false,
+					Message: fmt.Sprintf("Failed to save config: %v", err),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{
+				OK:      true,
+				Message: "X/Twitter adapter configured successfully",
+			}
+
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Println("✓ X/Twitter adapter configured")
+				fmt.Println("\nNote: Ensure bird is installed and authenticated:")
+				fmt.Println("  brew install steipete/tap/bird")
+				fmt.Println("  bird check")
+				fmt.Println("\nRun 'comms sync' to sync X events (bookmarks, likes, mentions)")
+			}
+		},
+	}
+	connectCmd.AddCommand(connectXCmd)
 	rootCmd.AddCommand(connectCmd)
 
 	// sync command
@@ -2527,6 +2589,13 @@ func checkAdapterStatus(name string, adapter config.AdapterConfig) string {
 			return "ready"
 		}
 		return "missing source"
+
+	case "bird":
+		// Check if bird CLI is available
+		if _, err := exec.LookPath("bird"); err != nil {
+			return "bird not installed (brew install steipete/tap/bird)"
+		}
+		return "ready"
 
 	default:
 		return "unknown adapter type"

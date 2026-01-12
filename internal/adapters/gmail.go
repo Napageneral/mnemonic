@@ -138,27 +138,121 @@ type GmailBody struct {
 	Data string `json:"data"`
 }
 
-// gogcliResponse wraps the response from gog gmail search
-type gogcliResponse struct {
-	Threads []GmailThread `json:"threads"`
+// gogcliSearchResponse wraps the response from gog gmail search (minimal thread info)
+type gogcliSearchResponse struct {
+	NextPageToken string `json:"nextPageToken"`
+	Threads       []struct {
+		ID string `json:"id"`
+	} `json:"threads"`
 }
 
-// fetchThreads executes gogcli to fetch Gmail threads
+// gogcliThreadResponse wraps the response from gog gmail thread get (full thread with messages)
+type gogcliThreadResponse struct {
+	Thread GmailThread `json:"thread"`
+}
+
+// fetchThreads executes gogcli to fetch Gmail threads with full messages (with pagination)
 func (g *GmailAdapter) fetchThreads(ctx context.Context, query string) ([]GmailThread, error) {
-	// Execute gog gmail search with JSON output
-	cmd := exec.CommandContext(ctx, "gog", "gmail", "search", query, "--json", "--max", "100")
+	var allThreadIDs []string
+	pageToken := ""
+	pageCount := 0
+	maxPages := 200 // Safety limit to prevent infinite loops
+
+	// Step 1: Paginate through search results to get all thread IDs
+	for pageCount < maxPages {
+		args := []string{"gmail", "search", query, "--json", "--max", "500", "--account", g.account}
+		if pageToken != "" {
+			args = append(args, "--page", pageToken)
+		}
+
+		cmd := exec.CommandContext(ctx, "gog", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			// Check for rate limit - if so, wait and retry
+			if strings.Contains(string(output), "rateLimitExceeded") {
+				fmt.Printf("  Rate limited, waiting 60s...\n")
+				time.Sleep(60 * time.Second)
+				continue // Retry same page
+			}
+			return nil, fmt.Errorf("gogcli search failed: %w (output: %s)", err, string(output))
+		}
+
+		var searchResp gogcliSearchResponse
+		if err := json.Unmarshal(output, &searchResp); err != nil {
+			return nil, fmt.Errorf("failed to parse search JSON: %w", err)
+		}
+
+		for _, t := range searchResp.Threads {
+			allThreadIDs = append(allThreadIDs, t.ID)
+		}
+
+		fmt.Printf("  Fetched page %d: %d threads (total so far: %d)\n", pageCount+1, len(searchResp.Threads), len(allThreadIDs))
+
+		// Check if there are more pages
+		if searchResp.NextPageToken == "" || len(searchResp.Threads) == 0 {
+			break
+		}
+		pageToken = searchResp.NextPageToken
+		pageCount++
+
+		// Small delay between pages to avoid rate limiting
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	fmt.Printf("  Total thread IDs found: %d\n", len(allThreadIDs))
+
+	// Step 2: Fetch each thread to get full messages (with rate limiting)
+	var threads []GmailThread
+	rateLimitRetries := 0
+	for i := 0; i < len(allThreadIDs); i++ {
+		threadID := allThreadIDs[i]
+		thread, err := g.fetchThread(ctx, threadID)
+		if err != nil {
+			// Check for rate limit - if so, wait and retry
+			if strings.Contains(err.Error(), "rateLimitExceeded") {
+				rateLimitRetries++
+				if rateLimitRetries > 5 {
+					fmt.Printf("  Too many rate limit retries, stopping with %d threads\n", len(threads))
+					break
+				}
+				fmt.Printf("  Rate limited on thread fetch, waiting 60s... (retry %d)\n", rateLimitRetries)
+				time.Sleep(60 * time.Second)
+				i-- // Retry same thread
+				continue
+			}
+			// Log warning but continue
+			fmt.Printf("Warning: failed to fetch thread %s: %v\n", threadID, err)
+			continue
+		}
+		threads = append(threads, thread)
+		rateLimitRetries = 0 // Reset on success
+
+		// Progress indicator every 100 threads
+		if (i+1)%100 == 0 {
+			fmt.Printf("  Fetched %d/%d threads\n", i+1, len(allThreadIDs))
+		}
+
+		// Small delay between thread fetches to avoid rate limiting
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return threads, nil
+}
+
+// fetchThread fetches a single thread with full messages
+func (g *GmailAdapter) fetchThread(ctx context.Context, threadID string) (GmailThread, error) {
+	cmd := exec.CommandContext(ctx, "gog", "gmail", "thread", "get", threadID, "--json", "--account", g.account)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("gogcli command failed: %w (output: %s)", err, string(output))
+		return GmailThread{}, fmt.Errorf("gogcli thread get failed: %w (output: %s)", err, string(output))
 	}
 
-	// Parse JSON response
-	var response gogcliResponse
-	if err := json.Unmarshal(output, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse gogcli JSON output: %w", err)
+	var resp gogcliThreadResponse
+	if err := json.Unmarshal(output, &resp); err != nil {
+		return GmailThread{}, fmt.Errorf("failed to parse thread JSON: %w", err)
 	}
 
-	return response.Threads, nil
+	return resp.Thread, nil
 }
 
 // syncThread syncs a single Gmail thread into the comms database

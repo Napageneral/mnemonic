@@ -3,7 +3,6 @@ package adapters
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,12 +63,30 @@ func (a *AixAdapter) Sync(ctx context.Context, commsDB *sql.DB, full bool) (Sync
 	if _, err := commsDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		return result, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
+	// Avoid transient SQLITE_BUSY errors during large writes.
+	_, _ = commsDB.Exec("PRAGMA busy_timeout = 5000")
+	// Prefer WAL for ingestion performance (safe default for SQLite).
+	_, _ = commsDB.Exec("PRAGMA journal_mode = WAL")
+	_, _ = commsDB.Exec("PRAGMA synchronous = NORMAL")
+	// Aggressive full-sync pragmas (speed > durability during import).
+	// NOTE: If the machine crashes mid-import, the comms DB could be left in a bad state.
+	// For full rebuilds, this is an acceptable tradeoff for performance.
+	if full {
+		_, _ = commsDB.Exec("PRAGMA synchronous = OFF")
+		_, _ = commsDB.Exec("PRAGMA temp_store = MEMORY")
+		_, _ = commsDB.Exec("PRAGMA cache_size = -200000")        // ~200MB
+		_, _ = commsDB.Exec("PRAGMA mmap_size = 268435456")       // 256MB
+		_, _ = commsDB.Exec("PRAGMA wal_autocheckpoint = 1000000") // reduce checkpoints
+	}
+	// Keep correctness while reducing per-statement overhead.
+	_, _ = commsDB.Exec("PRAGMA defer_foreign_keys = ON")
 
 	// Get sync watermark (seconds)
 	var lastSync int64
+	var lastEventID sql.NullString
 	if !full {
-		row := commsDB.QueryRow("SELECT last_sync_at FROM sync_watermarks WHERE adapter = ?", a.Name())
-		if err := row.Scan(&lastSync); err != nil && err != sql.ErrNoRows {
+		row := commsDB.QueryRow("SELECT last_sync_at, last_event_id FROM sync_watermarks WHERE adapter = ?", a.Name())
+		if err := row.Scan(&lastSync, &lastEventID); err != nil && err != sql.ErrNoRows {
 			return result, fmt.Errorf("failed to get sync watermark: %w", err)
 		}
 	}
@@ -88,30 +105,122 @@ func (a *AixAdapter) Sync(ctx context.Context, commsDB *sql.DB, full bool) (Sync
 	// Cache AI persons per model to avoid repeated DB round-trips.
 	aiByModel := make(map[string]string) // modelKey -> personID
 
-	eventsCreated, eventsUpdated, maxTS, personsCreated, err := a.syncMessages(ctx, aixDB, commsDB, lastSync, mePersonID, aiByModel)
+	lastEvent := ""
+	if lastEventID.Valid {
+		lastEvent = lastEventID.String
+	}
+
+	// Create AI persons *before* the big write transaction to avoid SQLITE_BUSY from nested transactions.
+	modelKeys, err := a.listModelsInWindow(aixDB, lastSync, lastEvent)
+	if err != nil {
+		return result, err
+	}
+	for _, mk := range modelKeys {
+		if _, ok := aiByModel[mk]; ok {
+			continue
+		}
+		pid, createdPerson, err := a.getOrCreateAIPerson(commsDB, mk)
+		if err != nil {
+			return result, err
+		}
+		aiByModel[mk] = pid
+		if createdPerson {
+			result.PersonsCreated++
+		}
+	}
+
+	phaseStart := time.Now()
+	eventsCreated, eventsUpdated, maxTS, maxEventID, personsCreated, perf, err := a.syncMessages(ctx, aixDB, commsDB, lastSync, lastEvent, mePersonID, aiByModel)
 	if err != nil {
 		return result, err
 	}
 	result.EventsCreated = eventsCreated
 	result.EventsUpdated = eventsUpdated
 	result.PersonsCreated += personsCreated
+	if result.Perf == nil {
+		result.Perf = map[string]string{}
+	}
+	for k, v := range perf {
+		result.Perf[k] = v
+	}
+	result.Perf["total"] = time.Since(phaseStart).String()
 
 	// Update watermark to max imported event timestamp (seconds)
 	watermark := lastSync
 	if maxTS > watermark {
 		watermark = maxTS
 	}
+	newLastEventID := lastEvent
+	if maxTS > lastSync {
+		newLastEventID = maxEventID
+	} else if maxTS == lastSync && maxEventID != "" && maxEventID > lastEvent {
+		newLastEventID = maxEventID
+	}
 	_, err = commsDB.Exec(`
 		INSERT INTO sync_watermarks (adapter, last_sync_at, last_event_id)
-		VALUES (?, ?, NULL)
-		ON CONFLICT(adapter) DO UPDATE SET last_sync_at = excluded.last_sync_at
-	`, a.Name(), watermark)
+		VALUES (?, ?, ?)
+		ON CONFLICT(adapter) DO UPDATE SET
+			last_sync_at = excluded.last_sync_at,
+			last_event_id = excluded.last_event_id
+	`, a.Name(), watermark, nullIfEmpty(newLastEventID))
 	if err != nil {
 		return result, fmt.Errorf("failed to update sync watermark: %w", err)
 	}
 
 	result.Duration = time.Since(start)
 	return result, nil
+}
+
+func (a *AixAdapter) listModelsInWindow(aixDB *sql.DB, lastSyncSeconds int64, lastEventID string) ([]string, error) {
+	query := `
+		SELECT DISTINCT COALESCE(NULLIF(TRIM(s.model), ''), 'unknown') as model_key
+		FROM messages m
+		JOIN sessions s ON m.session_id = s.id
+		WHERE s.source = ?
+		  AND (
+		    CAST(COALESCE(m.timestamp, s.created_at) / 1000 AS INTEGER) > ?
+		    OR (CAST(COALESCE(m.timestamp, s.created_at) / 1000 AS INTEGER) = ? AND m.id > ?)
+		  )
+	`
+	rows, err := aixDB.Query(query, a.source, lastSyncSeconds, lastSyncSeconds, lastEventID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list models: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var mk string
+		if err := rows.Scan(&mk); err != nil {
+			return nil, fmt.Errorf("scan model: %w", err)
+		}
+		out = append(out, mk)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return []string{"unknown"}, nil
+	}
+	// Ensure fallback exists.
+	foundUnknown := false
+	for _, mk := range out {
+		if mk == "unknown" {
+			foundUnknown = true
+			break
+		}
+	}
+	if !foundUnknown {
+		out = append(out, "unknown")
+	}
+	return out, nil
+}
+
+func nullIfEmpty(s string) interface{} {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return s
 }
 
 func (a *AixAdapter) ensureMeIdentity(commsDB *sql.DB, mePersonID string) error {
@@ -186,10 +295,16 @@ func (a *AixAdapter) syncMessages(
 	aixDB *sql.DB,
 	commsDB *sql.DB,
 	lastSyncSeconds int64,
+	lastEventID string,
 	mePersonID string,
 	aiByModel map[string]string,
-) (created int, updated int, maxImportedTS int64, personsCreated int, err error) {
+) (created int, updated int, maxImportedTS int64, maxImportedEventID string, personsCreated int, perf map[string]string, err error) {
 	_ = ctx
+	perf = map[string]string{}
+
+	adapterPrefix := a.Name() + ":"
+	threadPrefix := "aix_session:"
+	const contentTypesText = "[\"text\"]"
 
 	query := `
 		SELECT
@@ -202,15 +317,67 @@ func (a *AixAdapter) syncMessages(
 		FROM messages m
 		JOIN sessions s ON m.session_id = s.id
 		WHERE s.source = ?
-		  AND CAST(COALESCE(m.timestamp, s.created_at) / 1000 AS INTEGER) > ?
-		ORDER BY ts_sec ASC
+		  AND (
+		    CAST(COALESCE(m.timestamp, s.created_at) / 1000 AS INTEGER) > ?
+		    OR (CAST(COALESCE(m.timestamp, s.created_at) / 1000 AS INTEGER) = ? AND m.id > ?)
+		  )
+		ORDER BY ts_sec ASC, m.id ASC
 	`
 
-	rows, err := aixDB.Query(query, a.source, lastSyncSeconds)
+	qStart := time.Now()
+	rows, err := aixDB.Query(query, a.source, lastSyncSeconds, lastSyncSeconds, lastEventID)
 	if err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("failed to query aix messages: %w", err)
+		return 0, 0, 0, "", 0, perf, fmt.Errorf("failed to query aix messages: %w", err)
 	}
 	defer rows.Close()
+	perf["query"] = time.Since(qStart).String()
+
+	// Bulk write in a single transaction for SQLite performance.
+	txStart := time.Now()
+	tx, err := commsDB.Begin()
+	if err != nil {
+		return 0, 0, 0, "", 0, perf, fmt.Errorf("begin comms tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmtInsertEvent, err := tx.Prepare(`
+		INSERT OR IGNORE INTO events (
+			id, timestamp, channel, content_types, content,
+			direction, thread_id, reply_to, source_adapter, source_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+	`)
+	if err != nil {
+		return 0, 0, 0, "", 0, perf, fmt.Errorf("prepare insert event: %w", err)
+	}
+	defer stmtInsertEvent.Close()
+
+	stmtUpdateEvent, err := tx.Prepare(`
+		UPDATE events
+		SET
+			content = ?,
+			content_types = ?,
+			thread_id = ?
+		WHERE source_adapter = ?
+		  AND source_id = ?
+		  AND (
+		    content IS NOT ?
+		    OR content_types IS NOT ?
+		    OR thread_id IS NOT ?
+		  )
+	`)
+	if err != nil {
+		return 0, 0, 0, "", 0, perf, fmt.Errorf("prepare update event: %w", err)
+	}
+	defer stmtUpdateEvent.Close()
+
+	stmtInsertParticipant, err := tx.Prepare(`
+		INSERT OR IGNORE INTO event_participants (event_id, person_id, role)
+		VALUES (?, ?, ?)
+	`)
+	if err != nil {
+		return 0, 0, 0, "", 0, perf, fmt.Errorf("prepare insert participant: %w", err)
+	}
+	defer stmtInsertParticipant.Close()
 
 	for rows.Next() {
 		var (
@@ -222,10 +389,13 @@ func (a *AixAdapter) syncMessages(
 			model     sql.NullString
 		)
 		if err := rows.Scan(&messageID, &sessionID, &role, &content, &tsSec, &model); err != nil {
-			return created, updated, maxImportedTS, personsCreated, fmt.Errorf("scan aix message: %w", err)
+			return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("scan aix message: %w", err)
 		}
 		if tsSec > maxImportedTS {
 			maxImportedTS = tsSec
+			maxImportedEventID = messageID
+		} else if tsSec == maxImportedTS && messageID > maxImportedEventID {
+			maxImportedEventID = messageID
 		}
 
 		modelKey := "unknown"
@@ -235,15 +405,8 @@ func (a *AixAdapter) syncMessages(
 
 		aiPersonID, ok := aiByModel[modelKey]
 		if !ok {
-			pid, createdPerson, err := a.getOrCreateAIPerson(commsDB, modelKey)
-			if err != nil {
-				return created, updated, maxImportedTS, personsCreated, err
-			}
-			aiPersonID = pid
-			aiByModel[modelKey] = pid
-			if createdPerson {
-				personsCreated++
-			}
+			// Should have been prefetched; fall back to "unknown" if needed.
+			aiPersonID = aiByModel["unknown"]
 		}
 
 		// Map to comms event semantics
@@ -257,33 +420,30 @@ func (a *AixAdapter) syncMessages(
 			direction = "observed"
 		}
 
-		contentTypesJSON, _ := json.Marshal([]string{"text"})
-		threadID := fmt.Sprintf("aix_session:%s", sessionID)
+		threadID := threadPrefix + sessionID
 
-		eventID := uuid.New().String()
-		_, err = commsDB.Exec(`
-			INSERT INTO events (
-				id, timestamp, channel, content_types, content,
-				direction, thread_id, reply_to, source_adapter, source_id
-			) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-			ON CONFLICT(source_adapter, source_id) DO UPDATE SET
-				content = excluded.content,
-				content_types = excluded.content_types,
-				thread_id = excluded.thread_id
-		`, eventID, tsSec, "cursor", string(contentTypesJSON), content.String, direction, threadID, a.Name(), messageID)
+		// Deterministic event ID to avoid UUID cost and extra lookups.
+		eventID := adapterPrefix + messageID
+
+		// Insert if new.
+		res, err := stmtInsertEvent.Exec(eventID, tsSec, "cursor", contentTypesText, content.String, direction, threadID, a.Name(), messageID)
 		if err != nil {
-			return created, updated, maxImportedTS, personsCreated, fmt.Errorf("upsert event: %w", err)
+			return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("insert event: %w", err)
 		}
-
-		// Determine if insert or update
-		var existingEventID string
-		row := commsDB.QueryRow("SELECT id FROM events WHERE source_adapter = ? AND source_id = ?", a.Name(), messageID)
-		if err := row.Scan(&existingEventID); err == nil {
-			if existingEventID == eventID {
-				created++
-			} else {
+		if n, _ := res.RowsAffected(); n == 1 {
+			created++
+		} else {
+			// Update only if content/thread changed (prevents massive write churn on incremental runs).
+			res2, err := stmtUpdateEvent.Exec(
+				content.String, contentTypesText, threadID,
+				a.Name(), messageID,
+				content.String, contentTypesText, threadID,
+			)
+			if err != nil {
+				return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("update event: %w", err)
+			}
+			if n2, _ := res2.RowsAffected(); n2 == 1 {
 				updated++
-				eventID = existingEventID
 			}
 		}
 
@@ -291,22 +451,26 @@ func (a *AixAdapter) syncMessages(
 		if mePersonID != "" && aiPersonID != "" {
 			switch role {
 			case "user":
-				_ = insertParticipant(commsDB, eventID, mePersonID, "sender")
-				_ = insertParticipant(commsDB, eventID, aiPersonID, "recipient")
+				_, _ = stmtInsertParticipant.Exec(eventID, mePersonID, "sender")
+				_, _ = stmtInsertParticipant.Exec(eventID, aiPersonID, "recipient")
 			case "assistant":
-				_ = insertParticipant(commsDB, eventID, aiPersonID, "sender")
-				_ = insertParticipant(commsDB, eventID, mePersonID, "recipient")
+				_, _ = stmtInsertParticipant.Exec(eventID, aiPersonID, "sender")
+				_, _ = stmtInsertParticipant.Exec(eventID, mePersonID, "recipient")
 			default:
-				_ = insertParticipant(commsDB, eventID, mePersonID, "observer")
-				_ = insertParticipant(commsDB, eventID, aiPersonID, "observer")
+				_, _ = stmtInsertParticipant.Exec(eventID, mePersonID, "observer")
+				_, _ = stmtInsertParticipant.Exec(eventID, aiPersonID, "observer")
 			}
 		}
 	}
 
 	if err := rows.Err(); err != nil {
-		return created, updated, maxImportedTS, personsCreated, err
+		return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, err
 	}
-	return created, updated, maxImportedTS, personsCreated, nil
+	if err := tx.Commit(); err != nil {
+		return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("commit comms tx: %w", err)
+	}
+	perf["tx_commit"] = time.Since(txStart).String()
+	return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, nil
 }
 
 func insertParticipant(db *sql.DB, eventID, personID, role string) error {

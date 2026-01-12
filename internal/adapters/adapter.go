@@ -22,4 +22,6 @@ type SyncResult struct {
 	EventsUpdated  int
 	PersonsCreated int
 	Duration       time.Duration
+	// Perf is an optional breakdown of phase timings (human-readable durations).
+	Perf map[string]string `json:"perf,omitempty"`
 }
