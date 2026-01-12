@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/Napageneral/comms/internal/adapters"
 	"github.com/Napageneral/comms/internal/config"
@@ -11,13 +13,13 @@ import (
 
 // AdapterResult contains the result of syncing a single adapter
 type AdapterResult struct {
-	AdapterName    string `json:"adapter_name"`
-	Success        bool   `json:"success"`
-	Error          string `json:"error,omitempty"`
-	EventsCreated  int    `json:"events_created"`
-	EventsUpdated  int    `json:"events_updated"`
-	PersonsCreated int    `json:"persons_created"`
-	Duration       string `json:"duration"`
+	AdapterName    string            `json:"adapter_name"`
+	Success        bool              `json:"success"`
+	Error          string            `json:"error,omitempty"`
+	EventsCreated  int               `json:"events_created"`
+	EventsUpdated  int               `json:"events_updated"`
+	PersonsCreated int               `json:"persons_created"`
+	Duration       string            `json:"duration"`
 	Perf           map[string]string `json:"perf,omitempty"`
 }
 
@@ -101,6 +103,8 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 		Success:     false,
 	}
 
+	_ = StartJob(db, name)
+
 	// Create adapter instance based on type
 	var adapter adapters.Adapter
 	var err error
@@ -125,7 +129,73 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 			result.Error = "Gmail adapter 'account' must be a string"
 			return result
 		}
-		adapter, err = adapters.NewGmailAdapter(account)
+		// Standardize instance name across installs: gmail-<account email>
+		instanceName := fmt.Sprintf("gmail-%s", strings.TrimSpace(strings.ToLower(account)))
+		var opts adapters.GmailAdapterOptions
+		if v, ok := cfg.Options["workers"]; ok {
+			if n, ok := v.(int); ok {
+				opts.Workers = n
+			}
+		}
+		if v, ok := cfg.Options["qps"]; ok {
+			switch t := v.(type) {
+			case float64:
+				opts.QPS = t
+			case int:
+				opts.QPS = float64(t)
+			}
+		}
+		adapter, err = adapters.NewGmailAdapter(instanceName, account, opts)
+		if err != nil {
+			result.Error = fmt.Sprintf("Failed to create adapter: %v", err)
+			return result
+		}
+
+	case "gogcli_calendar":
+		accountVal, ok := cfg.Options["account"]
+		if !ok {
+			result.Error = "Calendar adapter requires 'account' in config"
+			return result
+		}
+		account, ok := accountVal.(string)
+		if !ok || account == "" {
+			result.Error = "Calendar adapter 'account' must be a string"
+			return result
+		}
+		instanceName := fmt.Sprintf("calendar-%s", strings.TrimSpace(strings.ToLower(account)))
+		adapter, err = adapters.NewCalendarAdapter(instanceName, account)
+		if err != nil {
+			result.Error = fmt.Sprintf("Failed to create adapter: %v", err)
+			return result
+		}
+
+	case "gogcli_contacts":
+		accountVal, ok := cfg.Options["account"]
+		if !ok {
+			result.Error = "Contacts adapter requires 'account' in config"
+			return result
+		}
+		account, ok := accountVal.(string)
+		if !ok || account == "" {
+			result.Error = "Contacts adapter 'account' must be a string"
+			return result
+		}
+		instanceName := fmt.Sprintf("contacts-%s", strings.TrimSpace(strings.ToLower(account)))
+		var opts adapters.ContactsAdapterOptions
+		if v, ok := cfg.Options["workers"]; ok {
+			if n, ok := v.(int); ok {
+				opts.Workers = n
+			}
+		}
+		if v, ok := cfg.Options["qps"]; ok {
+			switch t := v.(type) {
+			case float64:
+				opts.QPS = t
+			case int:
+				opts.QPS = float64(t)
+			}
+		}
+		adapter, err = adapters.NewContactsAdapter(instanceName, account, opts)
 		if err != nil {
 			result.Error = fmt.Sprintf("Failed to create adapter: %v", err)
 			return result
@@ -169,6 +239,7 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 	syncResult, err := adapter.Sync(ctx, db, full)
 	if err != nil {
 		result.Error = fmt.Sprintf("Sync failed: %v", err)
+		_ = FinishJobError(db, name, "sync", nil, result.Error, nil)
 		return result
 	}
 
@@ -179,6 +250,14 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 	result.PersonsCreated = syncResult.PersonsCreated
 	result.Duration = syncResult.Duration.String()
 	result.Perf = syncResult.Perf
+
+	_ = FinishJobSuccess(db, name, "sync", nil, map[string]any{
+		"events_created":  result.EventsCreated,
+		"events_updated":  result.EventsUpdated,
+		"persons_created": result.PersonsCreated,
+		"duration":        result.Duration,
+		"finished_at":     time.Now().Unix(),
+	})
 
 	return result
 }

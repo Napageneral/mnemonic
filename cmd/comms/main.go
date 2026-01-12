@@ -4,15 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	stdsync "sync"
 	"time"
 
+	"github.com/Napageneral/comms/internal/bus"
 	"github.com/Napageneral/comms/internal/config"
 	"github.com/Napageneral/comms/internal/db"
 	"github.com/Napageneral/comms/internal/identify"
+	"github.com/Napageneral/comms/internal/importer"
 	"github.com/Napageneral/comms/internal/me"
 	"github.com/Napageneral/comms/internal/query"
 	"github.com/Napageneral/comms/internal/sync"
@@ -62,11 +67,11 @@ queryable event store with identity resolution.`,
 		Short: "Initialize comms config and database",
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
-				OK         bool   `json:"ok"`
-				Message    string `json:"message,omitempty"`
-				ConfigDir  string `json:"config_dir,omitempty"`
-				DataDir    string `json:"data_dir,omitempty"`
-				DBPath     string `json:"db_path,omitempty"`
+				OK        bool   `json:"ok"`
+				Message   string `json:"message,omitempty"`
+				ConfigDir string `json:"config_dir,omitempty"`
+				DataDir   string `json:"data_dir,omitempty"`
+				DBPath    string `json:"db_path,omitempty"`
 			}
 
 			result := Result{OK: true}
@@ -588,6 +593,11 @@ queryable event store with identity resolution.`,
 				os.Exit(1)
 			}
 
+			account = strings.TrimSpace(strings.ToLower(account))
+			adapterName := fmt.Sprintf("gmail-%s", account)
+			workers, _ := cmd.Flags().GetInt("workers")
+			qps, _ := cmd.Flags().GetFloat64("qps")
+
 			// TODO: Check if gogcli is installed and authenticated
 			// For now, just add the config
 
@@ -605,12 +615,20 @@ queryable event store with identity resolution.`,
 				os.Exit(1)
 			}
 
-			cfg.Adapters["gmail"] = config.AdapterConfig{
+			opts := map[string]interface{}{
+				"account": account,
+			}
+			if workers > 0 {
+				opts["workers"] = workers
+			}
+			if qps > 0 {
+				opts["qps"] = qps
+			}
+
+			cfg.Adapters[adapterName] = config.AdapterConfig{
 				Type:    "gogcli",
 				Enabled: true,
-				Options: map[string]interface{}{
-					"account": account,
-				},
+				Options: opts,
 			}
 
 			if err := cfg.Save(); err != nil {
@@ -635,18 +653,236 @@ queryable event store with identity resolution.`,
 				printJSON(result)
 			} else {
 				fmt.Println("✓ Gmail adapter configured")
+				fmt.Printf("  Adapter: %s\n", adapterName)
 				fmt.Printf("  Account: %s\n", account)
 				fmt.Println("\nNote: Ensure gogcli is installed and authenticated:")
 				fmt.Println("  brew install steipete/tap/gogcli")
 				fmt.Printf("  gog auth add %s\n", account)
-				fmt.Println("\nRun 'comms sync' to sync Gmail events")
+				fmt.Printf("\nRun 'comms sync --adapter %s' to sync Gmail events\n", adapterName)
 			}
 		},
 	}
 	connectGmailCmd.Flags().String("account", "", "Gmail account email address")
+	connectGmailCmd.Flags().Int("workers", 0, "Parallel thread fetch workers (default: adapter default)")
+	connectGmailCmd.Flags().Float64("qps", 0, "Approx API requests/sec for thread fetch (default: adapter default)")
 
 	connectCmd.AddCommand(connectImessageCmd)
 	connectCmd.AddCommand(connectGmailCmd)
+
+	// connect calendar
+	connectCalendarCmd := &cobra.Command{
+		Use:   "calendar",
+		Short: "Configure Google Calendar adapter (via gogcli)",
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK      bool   `json:"ok"`
+				Message string `json:"message,omitempty"`
+			}
+
+			account, _ := cmd.Flags().GetString("account")
+			if account == "" {
+				result := Result{OK: false, Message: "The --account flag is required (e.g., --account user@gmail.com)"}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			account = strings.TrimSpace(strings.ToLower(account))
+			adapterName := fmt.Sprintf("calendar-%s", account)
+
+			cfg, err := config.Load()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to load config: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			cfg.Adapters[adapterName] = config.AdapterConfig{
+				Type:    "gogcli_calendar",
+				Enabled: true,
+				Options: map[string]interface{}{
+					"account": account,
+				},
+			}
+			if err := cfg.Save(); err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to save config: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{OK: true, Message: "Calendar adapter configured successfully"}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Println("✓ Calendar adapter configured")
+				fmt.Printf("  Adapter: %s\n", adapterName)
+				fmt.Printf("  Account: %s\n", account)
+				fmt.Println("\nNote: Ensure gogcli is installed and authenticated:")
+				fmt.Println("  brew install steipete/tap/gogcli")
+				fmt.Printf("  gog auth add %s\n", account)
+				fmt.Printf("\nRun 'comms sync --adapter %s' to sync calendar events\n", adapterName)
+			}
+		},
+	}
+	connectCalendarCmd.Flags().String("account", "", "Google account email address")
+	connectCmd.AddCommand(connectCalendarCmd)
+
+	// connect contacts
+	connectContactsCmd := &cobra.Command{
+		Use:   "contacts",
+		Short: "Configure Google Contacts adapter (via gogcli)",
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK      bool   `json:"ok"`
+				Message string `json:"message,omitempty"`
+			}
+
+			account, _ := cmd.Flags().GetString("account")
+			if account == "" {
+				result := Result{OK: false, Message: "The --account flag is required (e.g., --account user@gmail.com)"}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			account = strings.TrimSpace(strings.ToLower(account))
+			adapterName := fmt.Sprintf("contacts-%s", account)
+
+			cfg, err := config.Load()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to load config: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			cfg.Adapters[adapterName] = config.AdapterConfig{
+				Type:    "gogcli_contacts",
+				Enabled: true,
+				Options: map[string]interface{}{
+					"account": account,
+				},
+			}
+			if err := cfg.Save(); err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to save config: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{OK: true, Message: "Contacts adapter configured successfully"}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Println("✓ Contacts adapter configured")
+				fmt.Printf("  Adapter: %s\n", adapterName)
+				fmt.Printf("  Account: %s\n", account)
+				fmt.Println("\nNote: Ensure People API is enabled for your gogcli OAuth project:")
+				fmt.Println("  People API: https://console.cloud.google.com/apis/library/people.googleapis.com")
+				fmt.Println("\nRun 'comms sync --adapter " + adapterName + " --full' to ingest contacts and unify identities")
+			}
+		},
+	}
+	connectContactsCmd.Flags().String("account", "", "Google account email address")
+	connectCmd.AddCommand(connectContactsCmd)
+
+	// connect google (gmail + calendar + contacts)
+	connectGoogleCmd := &cobra.Command{
+		Use:   "google",
+		Short: "Configure Gmail+Calendar+Contacts for an account and start backfills",
+		Run: func(cmd *cobra.Command, args []string) {
+			account, _ := cmd.Flags().GetString("account")
+			startBackfill, _ := cmd.Flags().GetBool("start")
+			if account == "" {
+				fmt.Fprintf(os.Stderr, "Error: --account is required\n")
+				os.Exit(1)
+			}
+			account = strings.TrimSpace(strings.ToLower(account))
+
+			// Configure adapters by reusing connect subcommands logic (direct config edits).
+			cfg, err := config.Load()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to load config: %v\n", err)
+				os.Exit(1)
+			}
+
+			gmailName := fmt.Sprintf("gmail-%s", account)
+			calName := fmt.Sprintf("calendar-%s", account)
+			contactsName := fmt.Sprintf("contacts-%s", account)
+
+			if cfg.Adapters == nil {
+				cfg.Adapters = map[string]config.AdapterConfig{}
+			}
+			cfg.Adapters[gmailName] = config.AdapterConfig{
+				Type:    "gogcli",
+				Enabled: true,
+				Options: map[string]interface{}{"account": account},
+			}
+			cfg.Adapters[calName] = config.AdapterConfig{
+				Type:    "gogcli_calendar",
+				Enabled: true,
+				Options: map[string]interface{}{"account": account},
+			}
+			cfg.Adapters[contactsName] = config.AdapterConfig{
+				Type:    "gogcli_contacts",
+				Enabled: true,
+				Options: map[string]interface{}{"account": account},
+			}
+
+			if err := cfg.Save(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to save config: %v\n", err)
+				os.Exit(1)
+			}
+
+			fmt.Println("✓ Google adapters configured")
+			fmt.Printf("  Gmail: %s\n", gmailName)
+			fmt.Printf("  Calendar: %s\n", calName)
+			fmt.Printf("  Contacts: %s\n", contactsName)
+
+			fmt.Println("\nEnable APIs (open these once, enable, done):")
+			fmt.Println("  People API: https://console.cloud.google.com/apis/library/people.googleapis.com")
+			fmt.Println("  Gmail API: https://console.cloud.google.com/apis/library/gmail.googleapis.com")
+			fmt.Println("  Calendar API: https://console.cloud.google.com/apis/library/calendar-json.googleapis.com")
+			fmt.Println("  Pub/Sub API (for realtime): https://console.cloud.google.com/apis/library/pubsub.googleapis.com")
+
+			if startBackfill {
+				// Start background backfills immediately.
+				fmt.Println("\nStarting background backfills...")
+				_ = exec.Command(os.Args[0], "sync", "--adapter", gmailName, "--full", "--background").Run()
+				_ = exec.Command(os.Args[0], "sync", "--adapter", calName, "--full", "--background").Run()
+				_ = exec.Command(os.Args[0], "sync", "--adapter", contactsName, "--full", "--background").Run()
+				fmt.Println("Run: comms sync status")
+			} else {
+				fmt.Println("\nBackfills not started (use --start to kick off automatically).")
+			}
+
+			fmt.Println("\nRealtime (Gmail):")
+			fmt.Println("  1) Run: comms watch gmail")
+			fmt.Println("  2) Configure Pub/Sub topic + start watch:")
+			fmt.Printf("     gog gmail watch start --account %s --topic projects/.../topics/... --hook-url http://127.0.0.1:8799/hook/gmail\n", account)
+		},
+	}
+	connectGoogleCmd.Flags().String("account", "", "Google account email address")
+	connectGoogleCmd.Flags().Bool("start", true, "Start background backfills immediately")
+	connectCmd.AddCommand(connectGoogleCmd)
 
 	// connect cursor (via aix)
 	connectCursorCmd := &cobra.Command{
@@ -798,13 +1034,81 @@ queryable event store with identity resolution.`,
 		Long:  "Synchronize communications from all enabled adapters or a specific adapter",
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
-				OK       bool                  `json:"ok"`
-				Message  string                `json:"message,omitempty"`
-				Adapters []sync.AdapterResult  `json:"adapters,omitempty"`
+				OK       bool                 `json:"ok"`
+				Message  string               `json:"message,omitempty"`
+				Adapters []sync.AdapterResult `json:"adapters,omitempty"`
+				Mode     string               `json:"mode,omitempty"`
 			}
 
 			adapterName, _ := cmd.Flags().GetString("adapter")
 			full, _ := cmd.Flags().GetBool("full")
+			background, _ := cmd.Flags().GetBool("background")
+
+			// Background mode: re-exec without --background and return immediately.
+			if background {
+				dataDir, err := config.GetDataDir()
+				if err != nil {
+					result := Result{OK: false, Message: fmt.Sprintf("Failed to get data dir: %v", err)}
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+				logPath := filepath.Join(dataDir, "comms-sync.log")
+
+				argv := make([]string, 0, len(os.Args))
+				for _, a := range os.Args {
+					// Drop --background variants.
+					if a == "--background" || a == "--background=true" {
+						continue
+					}
+					argv = append(argv, a)
+				}
+				// Ensure we have at least the binary name.
+				if len(argv) == 0 {
+					argv = []string{os.Args[0]}
+				}
+
+				f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+				if err != nil {
+					result := Result{OK: false, Message: fmt.Sprintf("Failed to open log file: %v", err)}
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+				defer f.Close()
+
+				bg := exec.Command(argv[0], argv[1:]...)
+				bg.Stdout = f
+				bg.Stderr = f
+				if err := bg.Start(); err != nil {
+					result := Result{OK: false, Message: fmt.Sprintf("Failed to start background sync: %v", err)}
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+
+				result := Result{
+					OK:      true,
+					Message: fmt.Sprintf("Background sync started (pid %d). Logs: %s", bg.Process.Pid, logPath),
+					Mode:    "background",
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Printf("✓ %s\n", result.Message)
+					fmt.Println("Run: comms sync status")
+				}
+				return
+			}
 
 			// Load config
 			cfg, err := config.Load()
@@ -852,6 +1156,7 @@ queryable event store with identity resolution.`,
 				OK:       syncResult.OK,
 				Message:  syncResult.Message,
 				Adapters: syncResult.Adapters,
+				Mode:     "foreground",
 			}
 
 			if jsonOutput {
@@ -876,6 +1181,15 @@ queryable event store with identity resolution.`,
 						fmt.Printf("  Events updated: %d\n", adapterResult.EventsUpdated)
 						fmt.Printf("  Persons created: %d\n", adapterResult.PersonsCreated)
 						fmt.Printf("  Duration: %s\n", adapterResult.Duration)
+						if len(adapterResult.Perf) > 0 {
+							// Print a few high-signal perf keys if present.
+							keys := []string{"watermark_read", "incremental_sync_query", "backfill_windows", "backfill_total", "backfill_last", "total", "hint_takeout"}
+							for _, k := range keys {
+								if v, ok := adapterResult.Perf[k]; ok && v != "" {
+									fmt.Printf("  %s: %s\n", k, v)
+								}
+							}
+						}
 					} else {
 						fmt.Printf("\n✗ %s\n", adapterResult.AdapterName)
 						fmt.Printf("  Error: %s\n", adapterResult.Error)
@@ -891,7 +1205,499 @@ queryable event store with identity resolution.`,
 	}
 	syncCmd.Flags().String("adapter", "", "Sync specific adapter (e.g., imessage, gmail)")
 	syncCmd.Flags().Bool("full", false, "Force full re-sync instead of incremental")
+	syncCmd.Flags().Bool("background", false, "Run sync in background (writes logs to comms-sync.log)")
+
+	// sync status subcommand
+	syncStatusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show sync job progress/status",
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK      bool             `json:"ok"`
+				Jobs    []sync.JobStatus `json:"jobs,omitempty"`
+				Message string           `json:"message,omitempty"`
+			}
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			jobs, err := sync.ListJobs(database)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to list jobs: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			if len(jobs) == 0 {
+				result := Result{OK: true, Message: "No job status found yet. Run: comms sync"}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Println(result.Message)
+				}
+				return
+			}
+
+			result := Result{OK: true, Jobs: jobs}
+			if jsonOutput {
+				printJSON(result)
+				return
+			}
+
+			fmt.Println("Sync job status:")
+			for _, j := range jobs {
+				updated := time.Unix(j.UpdatedAt, 0).Local().Format(time.RFC3339)
+				fmt.Printf("\n• %s\n", j.Adapter)
+				fmt.Printf("  Status: %s\n", j.Status)
+				fmt.Printf("  Phase: %s\n", j.Phase)
+				if j.Cursor != nil && *j.Cursor != "" {
+					fmt.Printf("  Cursor: %s\n", *j.Cursor)
+				}
+				fmt.Printf("  Updated: %s\n", updated)
+				if j.LastError != nil && *j.LastError != "" {
+					fmt.Printf("  Error: %s\n", *j.LastError)
+				}
+				// Print a couple of common progress fields if present.
+				if j.Progress != nil {
+					if v, ok := j.Progress["eta_seconds"]; ok {
+						fmt.Printf("  ETA: %v seconds\n", v)
+					}
+					if v, ok := j.Progress["hint_takeout"]; ok {
+						fmt.Printf("  Hint: %v\n", v)
+					}
+					if bf, ok := j.Progress["backfill"].(map[string]interface{}); ok {
+						if wd, ok := bf["windows_done"]; ok {
+							if wt, ok := bf["windows_total"]; ok {
+								fmt.Printf("  Backfill: %v/%v windows\n", wd, wt)
+							}
+						}
+						if cw, ok := bf["current_window"]; ok {
+							fmt.Printf("  Window: %v\n", cw)
+						}
+					}
+					if th, ok := j.Progress["threads"].(map[string]interface{}); ok {
+						if td, ok := th["done"]; ok {
+							if tt, ok := th["total"]; ok {
+								fmt.Printf("  Threads: %v/%v\n", td, tt)
+							}
+						}
+					}
+				}
+			}
+		},
+	}
+	syncCmd.AddCommand(syncStatusCmd)
 	rootCmd.AddCommand(syncCmd)
+
+	// import command
+	importCmd := &cobra.Command{
+		Use:   "import",
+		Short: "Import external data into comms",
+	}
+
+	// import mbox (Google Takeout)
+	importMBoxCmd := &cobra.Command{
+		Use:   "mbox",
+		Short: "Import Gmail MBOX (Google Takeout)",
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK      bool   `json:"ok"`
+				Message string `json:"message,omitempty"`
+
+				MessagesSeen      int    `json:"messages_seen,omitempty"`
+				EventsCreated     int    `json:"events_created,omitempty"`
+				EventsUpdated     int    `json:"events_updated,omitempty"`
+				PersonsCreated    int    `json:"persons_created,omitempty"`
+				MessagesTruncated int    `json:"messages_truncated,omitempty"`
+				Duration          string `json:"duration,omitempty"`
+			}
+
+			adapterName, _ := cmd.Flags().GetString("adapter")
+			account, _ := cmd.Flags().GetString("account")
+			path, _ := cmd.Flags().GetString("file")
+			limit, _ := cmd.Flags().GetInt("limit")
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+			if adapterName == "" {
+				result := Result{OK: false, Message: "The --adapter flag is required (e.g., gmail-tyler@intent-systems.com)"}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			if account == "" {
+				result := Result{OK: false, Message: "The --account flag is required (Gmail account email address)"}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			if path == "" {
+				result := Result{OK: false, Message: "The --file flag is required (path to .mbox)"}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			ctx := context.Background()
+			res, err := importer.ImportMBox(ctx, database, importer.MBoxImportOptions{
+				AdapterName:     adapterName,
+				AccountEmail:    account,
+				Path:            path,
+				Source:          "takeout",
+				LimitMessages:   limit,
+				DryRun:          dryRun,
+				MaxMessageBytes: 50 * 1024 * 1024,
+				CommitEvery:     500,
+			})
+			if err != nil && err != io.EOF {
+				result := Result{OK: false, Message: fmt.Sprintf("Import failed: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{
+				OK:                true,
+				Message:           "MBOX import completed",
+				MessagesSeen:      res.MessagesSeen,
+				EventsCreated:     res.EventsCreated,
+				EventsUpdated:     res.EventsUpdated,
+				PersonsCreated:    res.PersonsCreated,
+				MessagesTruncated: res.MessagesTruncated,
+				Duration:          res.Duration.String(),
+			}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Println("✓ MBOX import completed")
+				fmt.Printf("  Messages seen: %d\n", res.MessagesSeen)
+				fmt.Printf("  Events created: %d\n", res.EventsCreated)
+				fmt.Printf("  Events updated: %d\n", res.EventsUpdated)
+				fmt.Printf("  Persons created: %d\n", res.PersonsCreated)
+				if res.MessagesTruncated > 0 {
+					fmt.Printf("  Messages truncated: %d\n", res.MessagesTruncated)
+				}
+				fmt.Printf("  Duration: %s\n", res.Duration)
+				fmt.Println("\nNext: run an incremental API sync to establish history baseline:")
+				fmt.Printf("  comms sync --adapter %s\n", adapterName)
+			}
+		},
+	}
+	importMBoxCmd.Flags().String("adapter", "", "Adapter instance name (e.g., gmail-tyler@intent-systems.com)")
+	importMBoxCmd.Flags().String("account", "", "Gmail account email address (used for sent/received inference)")
+	importMBoxCmd.Flags().String("file", "", "Path to MBOX file (Google Takeout)")
+	importMBoxCmd.Flags().Int("limit", 0, "Only import first N messages (debug)")
+	importMBoxCmd.Flags().Bool("dry-run", false, "Parse and count but do not write to database")
+
+	importCmd.AddCommand(importMBoxCmd)
+	rootCmd.AddCommand(importCmd)
+
+	// watch command
+	watchCmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Run a local webhook receiver to trigger sync",
+	}
+
+	// watch gmail: receive forwarded Pub/Sub events from `gog gmail watch serve`
+	watchGmailCmd := &cobra.Command{
+		Use:   "gmail",
+		Short: "Receive gog Gmail watch webhooks and sync",
+		Run: func(cmd *cobra.Command, args []string) {
+			bind, _ := cmd.Flags().GetString("bind")
+			port, _ := cmd.Flags().GetInt("port")
+			path, _ := cmd.Flags().GetString("path")
+			token, _ := cmd.Flags().GetString("token")
+			adapterOnly, _ := cmd.Flags().GetString("adapter")
+			debounceSec, _ := cmd.Flags().GetInt("debounce-seconds")
+
+			cfg, err := config.Load()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to load config: %v\n", err)
+				os.Exit(1)
+			}
+
+			database, err := db.Open()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			type adapterRunState struct {
+				running bool
+				lastAt  time.Time
+			}
+			var mu stdsync.Mutex
+			stateByAdapter := map[string]*adapterRunState{}
+
+			selectAdapters := func() []string {
+				if adapterOnly != "" {
+					return []string{adapterOnly}
+				}
+				var out []string
+				for name, a := range cfg.Adapters {
+					if !a.Enabled {
+						continue
+					}
+					if a.Type == "gogcli" {
+						out = append(out, name)
+					}
+				}
+				return out
+			}
+
+			runAdapter := func(adapterName string) {
+				mu.Lock()
+				st, ok := stateByAdapter[adapterName]
+				if !ok {
+					st = &adapterRunState{}
+					stateByAdapter[adapterName] = st
+				}
+				if st.running {
+					mu.Unlock()
+					return
+				}
+				if debounceSec > 0 && !st.lastAt.IsZero() && time.Since(st.lastAt) < time.Duration(debounceSec)*time.Second {
+					mu.Unlock()
+					return
+				}
+				st.running = true
+				st.lastAt = time.Now()
+				mu.Unlock()
+
+				go func() {
+					defer func() {
+						mu.Lock()
+						st.running = false
+						mu.Unlock()
+					}()
+
+					res := sync.SyncOne(context.Background(), database, cfg, adapterName, false)
+					if !res.OK {
+						fmt.Fprintf(os.Stderr, "watch sync error (%s): %s\n", adapterName, res.Message)
+					} else {
+						fmt.Printf("watch sync OK (%s)\n", adapterName)
+					}
+				}()
+			}
+
+			mux := http.NewServeMux()
+			mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost && r.Method != http.MethodPut {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				if token != "" {
+					ok := false
+					// Accept either Authorization: Bearer <token> or ?token=<token>.
+					auth := r.Header.Get("Authorization")
+					if strings.HasPrefix(strings.ToLower(auth), "bearer ") && strings.TrimSpace(auth[7:]) == token {
+						ok = true
+					}
+					if r.URL.Query().Get("token") == token {
+						ok = true
+					}
+					if !ok {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+				}
+
+				// Drain body (ignore contents; Gmail adapter will use History API baseline).
+				_, _ = io.ReadAll(io.LimitReader(r.Body, 256*1024))
+				_ = r.Body.Close()
+
+				for _, a := range selectAdapters() {
+					runAdapter(a)
+				}
+
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok\n"))
+			})
+
+			addr := fmt.Sprintf("%s:%d", bind, port)
+			fmt.Printf("Listening on http://%s%s\n", addr, path)
+			fmt.Println("To connect gogcli watch forwarding to this receiver:")
+			fmt.Printf("  gog gmail watch serve --bind %s --port 8788 --path /gmail-pubsub --hook-url http://%s%s", bind, addr, path)
+			if token != "" {
+				fmt.Printf(" --hook-token %s", token)
+			}
+			fmt.Println()
+			fmt.Println("Then start/renew watch (requires Pub/Sub topic):")
+			fmt.Println("  gog gmail watch start --topic projects/.../topics/... --account <acct>")
+
+			srv := &http.Server{
+				Addr:    addr,
+				Handler: mux,
+			}
+			if err := srv.ListenAndServe(); err != nil {
+				fmt.Fprintf(os.Stderr, "watch server stopped: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+	watchGmailCmd.Flags().String("bind", "127.0.0.1", "Bind address")
+	watchGmailCmd.Flags().Int("port", 8799, "Listen port")
+	watchGmailCmd.Flags().String("path", "/hook/gmail", "Webhook path")
+	watchGmailCmd.Flags().String("token", "", "Shared token (Authorization Bearer or ?token=)")
+	watchGmailCmd.Flags().String("adapter", "", "Only trigger sync for this adapter (default: all gogcli adapters)")
+	watchGmailCmd.Flags().Int("debounce-seconds", 10, "Minimum seconds between sync triggers per adapter")
+
+	watchCmd.AddCommand(watchGmailCmd)
+	rootCmd.AddCommand(watchCmd)
+
+	// bus command
+	busCmd := &cobra.Command{
+		Use:   "bus",
+		Short: "Inspect the comms event bus",
+	}
+
+	busListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List bus events",
+		Run: func(cmd *cobra.Command, args []string) {
+			since, _ := cmd.Flags().GetInt64("since")
+			limit, _ := cmd.Flags().GetInt("limit")
+
+			database, err := db.Open()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			events, err := bus.List(database, since, limit)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to list bus events: %v\n", err)
+				os.Exit(1)
+			}
+
+			if jsonOutput {
+				printJSON(map[string]any{"ok": true, "events": events})
+				return
+			}
+
+			if len(events) == 0 {
+				fmt.Println("No bus events.")
+				return
+			}
+			for _, e := range events {
+				t := time.Unix(e.CreatedAt, 0).Local().Format(time.RFC3339)
+				adapter := ""
+				if e.Adapter != nil {
+					adapter = *e.Adapter
+				}
+				ce := ""
+				if e.CommsEvent != nil {
+					ce = *e.CommsEvent
+				}
+				fmt.Printf("%d\t%s\t%s\t%s\t%s\n", e.Seq, t, e.Type, adapter, ce)
+			}
+		},
+	}
+	busListCmd.Flags().Int64("since", 0, "Only show events with seq > since")
+	busListCmd.Flags().Int("limit", 200, "Max events to return")
+
+	busTailCmd := &cobra.Command{
+		Use:   "tail",
+		Short: "Tail bus events (optionally follow)",
+		Run: func(cmd *cobra.Command, args []string) {
+			since, _ := cmd.Flags().GetInt64("since")
+			follow, _ := cmd.Flags().GetBool("follow")
+			intervalSec, _ := cmd.Flags().GetInt("interval-seconds")
+			limit, _ := cmd.Flags().GetInt("limit")
+
+			database, err := db.Open()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			emit := func(events []bus.Event) {
+				for _, e := range events {
+					t := time.Unix(e.CreatedAt, 0).Local().Format(time.RFC3339)
+					adapter := ""
+					if e.Adapter != nil {
+						adapter = *e.Adapter
+					}
+					ce := ""
+					if e.CommsEvent != nil {
+						ce = *e.CommsEvent
+					}
+					fmt.Printf("%d\t%s\t%s\t%s\t%s\n", e.Seq, t, e.Type, adapter, ce)
+					since = e.Seq
+				}
+			}
+
+			for {
+				events, err := bus.List(database, since, limit)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: failed to list bus events: %v\n", err)
+					os.Exit(1)
+				}
+				if jsonOutput {
+					printJSON(map[string]any{"ok": true, "events": events})
+					if !follow {
+						return
+					}
+				} else {
+					emit(events)
+					if !follow {
+						return
+					}
+				}
+				if intervalSec <= 0 {
+					intervalSec = 1
+				}
+				time.Sleep(time.Duration(intervalSec) * time.Second)
+			}
+		},
+	}
+	busTailCmd.Flags().Int64("since", 0, "Start tailing from seq > since")
+	busTailCmd.Flags().Bool("follow", true, "Keep polling for new events")
+	busTailCmd.Flags().Int("interval-seconds", 1, "Polling interval in seconds when following")
+	busTailCmd.Flags().Int("limit", 200, "Max events per poll")
+
+	busCmd.AddCommand(busListCmd)
+	busCmd.AddCommand(busTailCmd)
+	rootCmd.AddCommand(busCmd)
 
 	// identify command
 	identifyCmd := &cobra.Command{
@@ -905,12 +1711,12 @@ queryable event store with identity resolution.`,
 			}
 
 			type PersonInfo struct {
-				ID            string         `json:"id"`
-				Name          string         `json:"name"`
-				DisplayName   string         `json:"display_name,omitempty"`
-				IsMe          bool           `json:"is_me"`
-				Identities    []IdentityInfo `json:"identities"`
-				EventCount    int            `json:"event_count"`
+				ID          string         `json:"id"`
+				Name        string         `json:"name"`
+				DisplayName string         `json:"display_name,omitempty"`
+				IsMe        bool           `json:"is_me"`
+				Identities  []IdentityInfo `json:"identities"`
+				EventCount  int            `json:"event_count"`
 			}
 
 			type Result struct {
@@ -1315,6 +2121,263 @@ queryable event store with identity resolution.`,
 
 	identifyCmd.AddCommand(identifyMergeCmd)
 	identifyCmd.AddCommand(identifyAddCmd)
+
+	// identify suggestions command - generate merge suggestions
+	identifySuggestCmd := &cobra.Command{
+		Use:   "suggest",
+		Short: "Generate merge suggestions for similar persons",
+		Long:  "Analyze the identity graph and generate merge suggestions based on name similarity, shared domains, etc.",
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK                 bool   `json:"ok"`
+				Message            string `json:"message,omitempty"`
+				SuggestionsCreated int    `json:"suggestions_created"`
+			}
+
+			minEvents, _ := cmd.Flags().GetInt("min-events")
+			minConfidence, _ := cmd.Flags().GetFloat64("min-confidence")
+			maxSuggestions, _ := cmd.Flags().GetInt("max")
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			opts := identify.SuggestionOptions{
+				MinEventCount:  minEvents,
+				MinConfidence:  minConfidence,
+				MaxSuggestions: maxSuggestions,
+				NameSimilarity: true,
+				SharedDomain:   true,
+			}
+
+			count, err := identify.GenerateSuggestions(database, opts)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to generate suggestions: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{OK: true, SuggestionsCreated: count}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Printf("Generated %d merge suggestions\n", count)
+				fmt.Println("Use 'comms identify suggestions' to review them")
+			}
+		},
+	}
+	identifySuggestCmd.Flags().Int("min-events", 5, "Minimum event count for persons to consider")
+	identifySuggestCmd.Flags().Float64("min-confidence", 0.5, "Minimum confidence threshold")
+	identifySuggestCmd.Flags().Int("max", 100, "Maximum suggestions to generate")
+
+	// identify suggestions list command
+	identifySuggestionsCmd := &cobra.Command{
+		Use:   "suggestions",
+		Short: "List pending merge suggestions",
+		Long:  "Show merge suggestions that need user review",
+		Run: func(cmd *cobra.Command, args []string) {
+			type SuggestionInfo struct {
+				ID           string  `json:"id"`
+				Person1      string  `json:"person1"`
+				Person2      string  `json:"person2"`
+				EvidenceType string  `json:"evidence_type"`
+				Evidence     any     `json:"evidence,omitempty"`
+				Confidence   float64 `json:"confidence"`
+				EventCount   int     `json:"combined_event_count"`
+			}
+
+			type Result struct {
+				OK          bool             `json:"ok"`
+				Message     string           `json:"message,omitempty"`
+				Count       int              `json:"count"`
+				Suggestions []SuggestionInfo `json:"suggestions,omitempty"`
+			}
+
+			status, _ := cmd.Flags().GetString("status")
+			limit, _ := cmd.Flags().GetInt("limit")
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			suggestions, err := identify.ListSuggestions(database, status, limit)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to list suggestions: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			var infos []SuggestionInfo
+			for _, s := range suggestions {
+				infos = append(infos, SuggestionInfo{
+					ID:           s.ID,
+					Person1:      s.Person1Name,
+					Person2:      s.Person2Name,
+					EvidenceType: s.EvidenceType,
+					Evidence:     s.Evidence,
+					Confidence:   s.Confidence,
+					EventCount:   s.Person1EventCount + s.Person2EventCount,
+				})
+			}
+
+			result := Result{OK: true, Count: len(infos), Suggestions: infos}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				if len(infos) == 0 {
+					fmt.Println("No pending suggestions. Run 'comms identify suggest' to generate some.")
+				} else {
+					fmt.Printf("Found %d pending suggestions:\n\n", len(infos))
+					for _, s := range infos {
+						fmt.Printf("  [%s] %s ↔ %s\n", s.ID[:8], s.Person1, s.Person2)
+						fmt.Printf("    Evidence: %s (confidence: %.1f%%)\n", s.EvidenceType, s.Confidence*100)
+						fmt.Printf("    Combined events: %d\n\n", s.EventCount)
+					}
+					fmt.Println("Use 'comms identify accept <id>' or 'comms identify reject <id>'")
+				}
+			}
+		},
+	}
+	identifySuggestionsCmd.Flags().String("status", "pending", "Filter by status (pending, accepted, rejected, expired)")
+	identifySuggestionsCmd.Flags().Int("limit", 50, "Maximum suggestions to show")
+
+	// identify accept command
+	identifyAcceptCmd := &cobra.Command{
+		Use:   "accept <suggestion-id>",
+		Short: "Accept a merge suggestion (merges the two persons)",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK      bool   `json:"ok"`
+				Message string `json:"message,omitempty"`
+			}
+
+			suggestionID := args[0]
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Support short IDs
+			if len(suggestionID) < 36 {
+				// Try to find full ID
+				var fullID string
+				err := database.QueryRow(`SELECT id FROM merge_suggestions WHERE id LIKE ? AND status = 'pending' LIMIT 1`, suggestionID+"%").Scan(&fullID)
+				if err == nil {
+					suggestionID = fullID
+				}
+			}
+
+			err = identify.AcceptSuggestion(database, suggestionID)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to accept suggestion: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{OK: true, Message: "Suggestion accepted - persons merged"}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Println("✓ Suggestion accepted - persons merged")
+			}
+		},
+	}
+
+	// identify reject command
+	identifyRejectCmd := &cobra.Command{
+		Use:   "reject <suggestion-id>",
+		Short: "Reject a merge suggestion",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK      bool   `json:"ok"`
+				Message string `json:"message,omitempty"`
+			}
+
+			suggestionID := args[0]
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Support short IDs
+			if len(suggestionID) < 36 {
+				var fullID string
+				err := database.QueryRow(`SELECT id FROM merge_suggestions WHERE id LIKE ? AND status = 'pending' LIMIT 1`, suggestionID+"%").Scan(&fullID)
+				if err == nil {
+					suggestionID = fullID
+				}
+			}
+
+			err = identify.RejectSuggestion(database, suggestionID)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to reject suggestion: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{OK: true, Message: "Suggestion rejected"}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Println("✓ Suggestion rejected")
+			}
+		},
+	}
+
+	identifyCmd.AddCommand(identifySuggestCmd)
+	identifyCmd.AddCommand(identifySuggestionsCmd)
+	identifyCmd.AddCommand(identifyAcceptCmd)
+	identifyCmd.AddCommand(identifyRejectCmd)
 	rootCmd.AddCommand(identifyCmd)
 
 	// events command
@@ -1562,14 +2625,14 @@ queryable event store with identity resolution.`,
 			}
 
 			type PersonInfo struct {
-				ID            string         `json:"id"`
-				Name          string         `json:"name"`
-				DisplayName   string         `json:"display_name,omitempty"`
-				IsMe          bool           `json:"is_me"`
-				Relationship  string         `json:"relationship,omitempty"`
-				Identities    []IdentityInfo `json:"identities"`
-				EventCount    int            `json:"event_count"`
-				LastEventAt   string         `json:"last_event_at,omitempty"`
+				ID           string         `json:"id"`
+				Name         string         `json:"name"`
+				DisplayName  string         `json:"display_name,omitempty"`
+				IsMe         bool           `json:"is_me"`
+				Relationship string         `json:"relationship,omitempty"`
+				Identities   []IdentityInfo `json:"identities"`
+				EventCount   int            `json:"event_count"`
+				LastEventAt  string         `json:"last_event_at,omitempty"`
 			}
 
 			type Result struct {
@@ -2128,9 +3191,9 @@ Examples:
   comms tag add --channel imessage --since 2026-01-01 --tag topic:planning`,
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
-				OK            bool   `json:"ok"`
-				Message       string `json:"message,omitempty"`
-				EventsTagged  int    `json:"events_tagged,omitempty"`
+				OK           bool   `json:"ok"`
+				Message      string `json:"message,omitempty"`
+				EventsTagged int    `json:"events_tagged,omitempty"`
 			}
 
 			// Parse flags
@@ -2362,10 +3425,10 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
-				OK      bool          `json:"ok"`
-				Message string        `json:"message,omitempty"`
+				OK      bool                     `json:"ok"`
+				Message string                   `json:"message,omitempty"`
 				Rows    []map[string]interface{} `json:"rows,omitempty"`
-				Count   int           `json:"count,omitempty"`
+				Count   int                      `json:"count,omitempty"`
 			}
 
 			sqlQuery := args[0]

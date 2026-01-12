@@ -29,6 +29,14 @@ func Init() error {
 	}
 	defer db.Close()
 
+	// Pragmas for performance + concurrency.
+	// WAL allows concurrent readers while a writer is active.
+	// busy_timeout reduces SQLITE_BUSY errors under contention.
+	_, _ = db.Exec("PRAGMA journal_mode = WAL")
+	_, _ = db.Exec("PRAGMA synchronous = NORMAL")
+	_, _ = db.Exec("PRAGMA busy_timeout = 5000")
+	_, _ = db.Exec("PRAGMA foreign_keys = ON")
+
 	// Execute schema
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("failed to create schema: %w", err)
@@ -51,7 +59,21 @@ func Open() (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Enable foreign keys
+	// Pragmas for performance + concurrency.
+	// WAL allows concurrent readers while a writer is active.
+	// busy_timeout reduces SQLITE_BUSY errors under contention.
+	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable WAL: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA synchronous = NORMAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set synchronous: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
+	}
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)

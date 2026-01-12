@@ -61,6 +61,32 @@ CREATE TABLE IF NOT EXISTS event_participants (
 CREATE INDEX IF NOT EXISTS idx_event_participants_event ON event_participants(event_id);
 CREATE INDEX IF NOT EXISTS idx_event_participants_person ON event_participants(person_id);
 
+-- Event state: Channel-agnostic mutable state for messages
+CREATE TABLE IF NOT EXISTS event_state (
+    event_id TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    read_state TEXT NOT NULL DEFAULT 'unknown', -- unknown|read|unread
+    flagged INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'sent', -- draft|sent|received|failed|deleted|unknown
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_state_read_state ON event_state(read_state);
+CREATE INDEX IF NOT EXISTS idx_event_state_flagged ON event_state(flagged);
+CREATE INDEX IF NOT EXISTS idx_event_state_archived ON event_state(archived);
+
+-- Event tags: Channel-agnostic tags (distinct from analysis tags table above)
+CREATE TABLE IF NOT EXISTS event_tags (
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'system', -- system|user|analysis|gmail|imessage|...
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (event_id, tag, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_tags_event ON event_tags(event_id);
+CREATE INDEX IF NOT EXISTS idx_event_tags_tag ON event_tags(tag);
+
 -- Tags: Soft tags on events for categorization
 CREATE TABLE IF NOT EXISTS tags (
     id TEXT PRIMARY KEY,
@@ -81,6 +107,65 @@ CREATE TABLE IF NOT EXISTS sync_watermarks (
     last_sync_at INTEGER NOT NULL,
     last_event_id TEXT
 );
+
+-- Adapter state: generic key/value store for adapter-specific durable state
+CREATE TABLE IF NOT EXISTS adapter_state (
+    adapter TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (adapter, key)
+);
+
+-- Bus events: append-only event stream for downstream automation
+CREATE TABLE IF NOT EXISTS bus_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    type TEXT NOT NULL,
+    adapter TEXT,
+    comms_event_id TEXT,
+    created_at INTEGER NOT NULL,
+    payload_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bus_events_created_at ON bus_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_bus_events_type ON bus_events(type);
+CREATE INDEX IF NOT EXISTS idx_bus_events_event ON bus_events(comms_event_id);
+
+-- Sync jobs: Track background/resumable sync progress per adapter
+CREATE TABLE IF NOT EXISTS sync_jobs (
+    adapter TEXT PRIMARY KEY,
+    status TEXT NOT NULL,      -- running, success, error
+    phase TEXT NOT NULL,       -- sync, recent, backfill, incremental, history
+    cursor TEXT,               -- opaque cursor (e.g., backfill:YYYY-MM-DD)
+    started_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    last_error TEXT,
+    progress_json TEXT         -- JSON blob with counters, ETA, etc.
+);
+
+-- Merge suggestions: Proposed identity merges for user review
+-- Generated from fuzzy evidence (name similarity, shared domains) rather than
+-- deterministic matches (exact email/phone overlap which auto-merge).
+CREATE TABLE IF NOT EXISTS merge_suggestions (
+    id TEXT PRIMARY KEY,
+    person1_id TEXT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    person2_id TEXT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    evidence_type TEXT NOT NULL,   -- name_similarity, shared_domain, co_occurrence
+    evidence_json TEXT,            -- details about why this match was suggested
+    confidence REAL NOT NULL,      -- 0.0-1.0 score
+    person1_event_count INTEGER,   -- cached for prioritization
+    person2_event_count INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, accepted, rejected, expired
+    created_at INTEGER NOT NULL,
+    reviewed_at INTEGER,
+    UNIQUE(person1_id, person2_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_merge_suggestions_status ON merge_suggestions(status);
+CREATE INDEX IF NOT EXISTS idx_merge_suggestions_confidence ON merge_suggestions(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_merge_suggestions_person1 ON merge_suggestions(person1_id);
+CREATE INDEX IF NOT EXISTS idx_merge_suggestions_person2 ON merge_suggestions(person2_id);
 
 -- Insert initial schema version
 INSERT OR IGNORE INTO schema_version (version, applied_at)
