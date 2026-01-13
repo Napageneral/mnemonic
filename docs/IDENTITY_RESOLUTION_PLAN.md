@@ -4,6 +4,14 @@
 
 This document outlines the approach for intelligent identity resolution across communication channels in comms. The core insight: **people share their identifiers in messages all the time**. By extracting ALL PII from message content with LLM intelligence, we can build rich identity graphs that naturally merge when they accumulate enough overlapping facts.
 
+**Prerequisites**: This plan assumes the Eve→Comms migration is complete, providing:
+- `threads` table for chat/channel metadata
+- `conversations` + `conversation_events` for flexible chunking
+- `analysis_types` + `analysis_runs` + `facets` for generic analysis framework
+- `embeddings` table for vector storage
+
+---
+
 ## The Problem
 
 We have contacts in different channels that are the same person but appear as separate entities:
@@ -20,6 +28,8 @@ Traditional approaches fail:
 - **Social graph alone**: Can't make the Dad → James Brandt jump
 - **Regex extraction**: No context = false positives (whose email is this?)
 
+---
+
 ## The Solution: Identity Graphs + PII Extraction
 
 **One unified mechanism:** Extract ALL PII from every conversation using LLM intelligence that understands context and attribution.
@@ -32,42 +42,16 @@ Traditional approaches fail:
    - ALL identifiers (emails, phones, usernames)
    - Names (full name, nicknames)
    - Relationships
-   - Locations, employers, and hundreds of other facts
+   - Locations, employers, ownership, and hundreds of other facts
    - **Crucially**: WHO each fact belongs to (self-disclosed vs mentioned)
 
 3. **Build identity graphs**: Each extraction adds facts to the person's identity graph
 
-4. **Merge on collisions**: When two identity graphs accumulate enough overlapping facts, they merge:
-   - **Hard identifiers** (email, phone): Instant merge
-   - **Soft identifiers** (full name + employer, nickname + location): Merge when multiple collide
+4. **Merge on collisions**: When two identity graphs accumulate enough overlapping facts, they merge
 
 5. **Create new nodes**: Third parties mentioned in conversations become new identity nodes, forming their own graphs until resolved
 
-### Example Flow
-
-```
-Day 1: iMessage sync
-├── Create node: "Dad" (+16508238440)
-└── Extract from Dad's messages:
-    ├── email: jim@napageneralstore.com (self-disclosed)
-    ├── email: napageneral@gmail.com (self-disclosed)
-    ├── full_name: "Jim" / "James" (inferred)
-    ├── employer: "Napa General Store" (inferred)
-    └── location: "Napa, CA", "Harwich, MA"
-
-Day 2: Gmail sync  
-├── Create node: jim@napageneralstore.com
-├── Extract from Jim's emails:
-│   ├── full_name: "James Brandt" (from signature)
-│   ├── phone: (650) 823-8440 (from signature) 
-│   ├── employer: "Napa General Store"
-│   └── relationships: spouse "Jill"
-
-COLLISION DETECTED:
-├── Dad (+16508238440) has email jim@napageneralstore.com
-├── jim@napageneralstore.com exists as separate node
-└── → MERGE: Dad = Jim Brandt = jim@napageneralstore.com = napageneral@gmail.com
-```
+---
 
 ## Evidence We Found
 
@@ -91,42 +75,126 @@ Uncle Scott (+18607294099):
 
 ---
 
+## Identifier Taxonomy (Refined)
+
+In a personal context (~1-10k contacts), identifier "hardness" shifts:
+
+### Hard Identifiers (1 match = merge candidate)
+Single match is very strong evidence in a personal contact graph:
+- `email_personal`, `email_work`
+- `phone_mobile`, `phone_home`, `phone_work`
+- `social_handle_*` (Twitter/X, Instagram, LinkedIn, etc.)
+- `username_*` (platform-specific)
+- `full_legal_name` (in personal graph, duplicates are rare)
+
+### Compound Hard Identifiers (all parts match = merge)
+Individual fields that become unique when combined:
+- `full_name` + `birthdate`
+- `full_name` + `employer` + `city`
+- `first_name` + `spouse_name` + `children_count` + `city`
+- `nickname` + `employer` + `profession`
+
+### Correlating Identifiers (accumulate for scoring)
+Multiple matches increase confidence:
+- `employer_current` (weight: 0.20)
+- `location_current` (weight: 0.15)
+- `profession` (weight: 0.15)
+- `spouse_first_name` (weight: 0.25)
+- `school_attended` (weight: 0.15)
+- `birthdate` (weight: 0.25)
+
+### Enrichment Facts (profile only, never merge)
+Build rich profiles but don't trigger identity matching:
+- Hobbies, interests
+- Preferences
+- Personality traits
+- Opinions, values
+- Physical characteristics
+
+### Shared/Joint Identifiers (flag, don't auto-merge)
+Could legitimately belong to multiple people:
+- `bank_account` (joint accounts)
+- `address_home` (shared residence)
+- `family_phone` (family plan)
+- `business_email` (team@company.com)
+
+### Specific Government/Financial IDs
+Be explicit rather than grouping:
+- `ssn` - Social Security Number
+- `passport_number`
+- `drivers_license_number`
+- `tax_id` (EIN, ITIN)
+- `voter_registration_id`
+- `military_id`
+- `crypto_wallet_address`
+
+### Professional Distinctions
+Important distinction: **employment vs ownership**:
+- `employer_current` / `employer_past` - where you work FOR someone
+- `business_owned` - businesses you OWN (array)
+- `business_role` - Owner, Co-owner, Partner, Founder
+- `business_invested` - investments/board seats
+- `profession` - what you do (not where)
+
+---
+
 ## The Extraction Pipeline
 
-### Single Mechanism: LLM PII Extraction
+### Integration with Analysis Framework
 
-Every conversation chunk goes through ONE comprehensive extraction:
+PII extraction is an `analysis_type` in the post-migration schema:
+
+```sql
+INSERT INTO analysis_types (id, name, version, output_type, facets_config_json, prompt_template, ...)
+VALUES (
+  'pii_extraction_v1',
+  'pii_extraction',
+  '1.0.0',
+  'structured',
+  '{
+    "extractions": [
+      {"facet_type": "pii_email", "json_path": "$.persons[*].pii.contact_information.email_*", ...},
+      {"facet_type": "pii_phone", "json_path": "$.persons[*].pii.contact_information.phone_*", ...},
+      {"facet_type": "pii_full_name", "json_path": "$.persons[*].pii.core_identity.full_legal_name", ...},
+      {"facet_type": "pii_employer", "json_path": "$.persons[*].pii.professional.employer_current", ...},
+      {"facet_type": "pii_business_owned", "json_path": "$.persons[*].pii.professional.business_owned", ...},
+      ... all PII types
+    ]
+  }',
+  '<prompt from pii-extraction-v1.prompt.md>',
+  'gemini-2.0-flash'
+);
+```
+
+### Pipeline Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    PII EXTRACTION PIPELINE                          │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│  INPUT: Conversation chunk (50-100 messages)                       │
-│  ├── Channel (iMessage, Gmail, etc.)                               │
-│  ├── Primary contact (who the user is talking to)                  │
-│  └── User identity (for attribution)                               │
+│  INPUT: Conversation (from conversations table)                     │
+│  ├── Get events via conversation_events                             │
+│  ├── Channel, thread, participants from conversation metadata       │
+│  └── User identity for attribution                                  │
 │                                                                     │
-│  EXTRACTION (LLM with full PII taxonomy):                          │
-│  ├── For primary contact: extract ALL their PII                    │
-│  ├── For user: extract any self-disclosed PII                      │
-│  ├── For third parties: extract mentioned PII                      │
-│  └── Attribute correctly: whose info is this?                      │
+│  EXTRACTION (via analysis_runs):                                    │
+│  ├── Create analysis_run (status='pending')                         │
+│  ├── Call LLM with pii-extraction-v1 prompt                         │
+│  ├── Parse structured JSON output                                   │
+│  └── Update analysis_run (status='completed')                       │
 │                                                                     │
-│  OUTPUT: Structured PII for each person mentioned                   │
-│  ├── Core identity (names, DOB, physical description)              │
-│  ├── Contact info (emails, phones, addresses)                      │
-│  ├── Relationships (family, friends, colleagues)                   │
-│  ├── Professional (employer, title, education)                     │
-│  ├── Digital identity (usernames, social handles)                  │
-│  ├── Location (current, previous, frequent)                        │
-│  ├── Lifestyle (hobbies, preferences)                              │
-│  └── Sensitive (flagged but stored securely)                       │
+│  OUTPUT (to facets table):                                          │
+│  ├── Insert facets with facet_type='pii_*'                          │
+│  ├── Link to person_id where attributable                           │
+│  ├── Include confidence and metadata_json (evidence, source_type)   │
+│  └── Flag sensitive facets in metadata                              │
 │                                                                     │
-│  GRAPH UPDATE:                                                      │
-│  ├── Add facts to existing identity nodes                          │
-│  ├── Create new nodes for unknown third parties                    │
-│  └── Check for merge conditions                                    │
+│  IDENTITY UPDATE (post-extraction job):                             │
+│  ├── Sync facets → person_facts (for resolution queries)            │
+│  ├── Index hard identifiers → identities table                      │
+│  ├── Create new person nodes for third parties                      │
+│  └── Queue resolution check                                         │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -144,89 +212,123 @@ The LLM understands:
 - **Relationships**: "send this to mom's email"
 - **Context**: Business vs personal, forwarding vs sharing
 
-### Complete PII Taxonomy
-
-See `/Users/tyler/nexus/home/projects/comms/prompts/pii-extraction-v1.prompt.md` for the full taxonomy covering:
-
-1. **Core Identity**: Names, DOB, gender, nationality, physical description
-2. **Contact Information**: All emails, phones, addresses
-3. **Digital Identity**: Usernames, social handles, websites
-4. **Relationships**: Family, professional, social connections
-5. **Professional**: Employment, education, certifications
-6. **Government IDs**: Passport, DL, SSN (sensitive)
-7. **Financial**: Bank accounts, payment handles (sensitive)
-8. **Medical**: Health information (sensitive)
-9. **Life Events**: Birthdays, anniversaries, milestones
-10. **Location**: Current, previous, vacation homes
-11. **Lifestyle**: Hobbies, preferences, pets, vehicles
-
 ---
 
-## Identity Graph Model
+## Identity Resolution Algorithm
 
-### Core Concept
+### Key Insight: Identifier-Centric (O(F) not O(P²))
 
-Each person is an **identity node** with a growing graph of facts:
-
+**Bad approach** - compare all person pairs:
 ```
-Identity Node: Dad
-├── Primary Identifier: +16508238440 (phone)
-├── Confidence: 1.0 (known contact)
-│
-├── Hard Identifiers (instant merge triggers):
-│   ├── email: jim@napageneralstore.com (confidence: 0.95)
-│   ├── email: napageneral@gmail.com (confidence: 0.95)
-│   └── phone: +16508238440 (confidence: 1.0)
-│
-├── Soft Identifiers (merge when multiple collide):
-│   ├── full_name: "James Brandt" (confidence: 0.85)
-│   ├── nickname: "Jim" (confidence: 0.90)
-│   ├── employer: "Napa General Store" (confidence: 0.90)
-│   └── location: "Napa, CA" (confidence: 0.85)
-│
-├── Enrichment Facts:
-│   ├── spouse: "Jill" (confidence: 0.80)
-│   ├── children: ["Tyler"] (confidence: 0.95)
-│   ├── vacation_home: "Harwich, MA" (confidence: 0.85)
-│   ├── username: "napageneral" (confidence: 0.95)
-│   └── ...hundreds more possible facts
-│
-└── Evidence Links:
-    └── Each fact links to source message(s)
+FOR each person P1:
+  FOR each person P2:
+    compare(P1, P2)  # O(P²) = millions of comparisons
 ```
 
-### Merge Conditions
-
-**Automatic Merge (Hard Identifier Match)**:
+**Good approach** - iterate through facts, find collisions:
 ```
-IF identity_a.emails ∩ identity_b.emails ≠ ∅
-   OR identity_a.phones ∩ identity_b.phones ≠ ∅
-THEN merge(identity_a, identity_b)
-```
-
-**Suggested Merge (Soft Identifier Collision)**:
-```
-IF count(matching_soft_identifiers) >= 3
-   AND avg(confidence) >= 0.7
-THEN suggest_merge(identity_a, identity_b)
-
-Example:
-- Same full_name: "James Brandt"
-- Same employer: "Napa General Store"  
-- Same location: "Napa, CA"
-→ High confidence these are the same person
+FOR each fact_type in ORDER BY hardness DESC:
+  GROUP facts BY fact_value
+  FOR each group WHERE count > 1:
+    # Multiple persons share this exact value
+    process_collision(persons_in_group, fact_type)
 ```
 
-**New Identity Creation**:
-```
-IF third_party mentioned with sufficient detail
-   AND no existing node matches
-THEN create_new_node(third_party)
+This is O(F) where F = number of facts, not O(P²) where P = persons.
 
-Example: "Meeting up with Jim and Janet"
-→ Create node for "Janet" with minimal facts
-→ Node grows as more extractions mention her
+### Resolution Algorithm
+
 ```
+RESOLVE_IDENTITIES():
+  similarity_scores = {}  # (person1, person2) -> score
+  
+  # Phase 1: Hard identifier resolution
+  FOR type IN ['email_personal', 'email_work', 'phone_mobile', 'phone_home',
+               'full_legal_name', 'social_handle_twitter', 'social_handle_linkedin', ...]:
+    
+    collisions = SQL """
+      SELECT fact_value, GROUP_CONCAT(person_id) as persons
+      FROM person_facts
+      WHERE fact_type = {type} AND is_identifier = 1
+      GROUP BY fact_value
+      HAVING COUNT(DISTINCT person_id) > 1
+    """
+    
+    FOR each collision:
+      persons = collision.persons.split(',')
+      IF type IN HARD_IDENTIFIERS AND avg_confidence(persons, type) >= 0.8:
+        # High confidence hard ID match
+        CREATE merge_event(persons, type='hard_identifier', auto=TRUE)
+      ELSE:
+        CREATE merge_suggestion(persons, type, confidence)
+
+  # Phase 2: Compound identifier resolution
+  compound_matches = SQL """
+    SELECT pf1.person_id as p1, pf2.person_id as p2
+    FROM person_facts pf1
+    JOIN person_facts pf2 ON pf1.fact_value = pf2.fact_value 
+      AND pf1.person_id < pf2.person_id
+    WHERE pf1.fact_type = 'full_name'
+    GROUP BY pf1.person_id, pf2.person_id
+    HAVING 
+      SUM(CASE WHEN pf1.fact_type = 'birthdate' THEN 1 ELSE 0 END) > 0
+      OR (SUM(CASE WHEN pf1.fact_type = 'employer_current' THEN 1 ELSE 0 END) > 0
+          AND SUM(CASE WHEN pf1.fact_type = 'location_current' THEN 1 ELSE 0 END) > 0)
+  """
+  FOR each match:
+    CREATE merge_suggestion(match.p1, match.p2, type='compound', confidence=0.85)
+
+  # Phase 3: Soft identifier accumulation
+  FOR type IN ['employer_current', 'location_current', 'profession', 
+               'spouse_first_name', 'school_attended', 'birthdate']:
+    weight = WEIGHTS[type]  # 0.15-0.25
+    
+    collisions = find_collisions(type)
+    FOR each collision:
+      FOR p1, p2 IN pairs(collision.persons):
+        similarity_scores[(p1, p2)] += weight
+
+  # Phase 4: Generate suggestions from accumulated scores
+  FOR (p1, p2), score IN similarity_scores:
+    IF score >= 0.6:
+      matching_facts = get_shared_facts(p1, p2)
+      CREATE merge_suggestion(p1, p2, matching_facts, confidence=score)
+
+  # Phase 5: Execute auto-merges
+  FOR each merge_event WHERE auto = TRUE:
+    # Validate no conflicts
+    IF has_conflicting_facts(source, target):
+      DOWNGRADE to merge_suggestion
+    ELSE:
+      EXECUTE_MERGE(source, target)
+      # Move all facts, identities from source to target
+      # Mark source as merged_into target
+```
+
+### Handling Ambiguous Data
+
+For data that can't be attributed (phone number sent with no context):
+
+```sql
+CREATE TABLE unattributed_facts (
+    id TEXT PRIMARY KEY,
+    fact_type TEXT NOT NULL,           -- "phone", "email", etc.
+    fact_value TEXT NOT NULL,
+    shared_by_person_id TEXT,          -- who sent it
+    source_event_id TEXT,              -- the message
+    source_conversation_id TEXT,
+    context TEXT,                      -- any surrounding context
+    possible_attributions TEXT,        -- JSON array of guesses
+    
+    resolved_to_person_id TEXT,        -- filled when we figure it out
+    resolution_evidence TEXT,
+    
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER
+);
+```
+
+Later context can resolve these: "that's my sister's number" → attribute to sister.
 
 ---
 
@@ -240,20 +342,22 @@ CREATE TABLE person_facts (
     person_id TEXT NOT NULL REFERENCES persons(id),
     
     -- What fact
-    category TEXT NOT NULL,         -- 'core_identity', 'contact', 'relationship', etc.
-    fact_type TEXT NOT NULL,        -- 'email_work', 'full_name', 'spouse', etc.
+    category TEXT NOT NULL,         -- 'core_identity', 'contact', 'professional', etc.
+    fact_type TEXT NOT NULL,        -- 'email_work', 'full_name', 'business_owned', etc.
     fact_value TEXT NOT NULL,       -- the actual value
     
     -- Confidence & Source
     confidence REAL DEFAULT 0.5,    -- 0.0-1.0
     source_type TEXT NOT NULL,      -- 'self_disclosed', 'mentioned', 'inferred', 'signature'
-    source_channel TEXT,            -- 'iMessage', 'gmail', etc.
-    source_event_id TEXT,           -- event where extracted
+    source_channel TEXT,            -- 'imessage', 'gmail', etc.
+    source_conversation_id TEXT,    -- conversation where extracted
+    source_facet_id TEXT,           -- link to facets table
     evidence TEXT,                  -- quote from message
     
-    -- Flags
-    is_sensitive INTEGER DEFAULT 0, -- SSN, medical, financial
-    is_identifier INTEGER DEFAULT 0, -- can be used for merging
+    -- Classification
+    is_sensitive INTEGER DEFAULT 0,    -- SSN, medical, financial
+    is_identifier INTEGER DEFAULT 0,   -- used for identity matching
+    is_hard_identifier INTEGER DEFAULT 0,  -- triggers instant merge consideration
     
     -- Timestamps
     created_at INTEGER NOT NULL,
@@ -265,28 +369,34 @@ CREATE TABLE person_facts (
 CREATE INDEX idx_person_facts_person ON person_facts(person_id);
 CREATE INDEX idx_person_facts_type ON person_facts(category, fact_type);
 CREATE INDEX idx_person_facts_value ON person_facts(fact_value);
-CREATE INDEX idx_person_facts_identifier ON person_facts(is_identifier) WHERE is_identifier = 1;
+CREATE INDEX idx_person_facts_hard_id ON person_facts(fact_type, fact_value) 
+    WHERE is_hard_identifier = 1;
 ```
 
-### extraction_runs Table
+### unattributed_facts Table
 
 ```sql
-CREATE TABLE extraction_runs (
+CREATE TABLE unattributed_facts (
     id TEXT PRIMARY KEY,
-    person_id TEXT NOT NULL,
-    channel TEXT NOT NULL,
-    conversation_id TEXT,           -- if applicable
-    event_range_start TEXT,
-    event_range_end TEXT,
-    message_count INTEGER,
+    fact_type TEXT NOT NULL,
+    fact_value TEXT NOT NULL,
     
-    status TEXT DEFAULT 'pending',  -- 'pending', 'complete', 'failed'
-    facts_extracted INTEGER DEFAULT 0,
-    new_identities_found INTEGER DEFAULT 0,
+    shared_by_person_id TEXT REFERENCES persons(id),
+    source_event_id TEXT REFERENCES events(id),
+    source_conversation_id TEXT REFERENCES conversations(id),
+    context TEXT,
+    possible_attributions TEXT,     -- JSON
+    
+    resolved_to_person_id TEXT REFERENCES persons(id),
+    resolution_evidence TEXT,
     
     created_at INTEGER NOT NULL,
-    completed_at INTEGER
+    resolved_at INTEGER
 );
+
+CREATE INDEX idx_unattributed_value ON unattributed_facts(fact_type, fact_value);
+CREATE INDEX idx_unattributed_unresolved ON unattributed_facts(resolved_to_person_id) 
+    WHERE resolved_to_person_id IS NULL;
 ```
 
 ### merge_events Table
@@ -296,17 +406,21 @@ CREATE TABLE merge_events (
     id TEXT PRIMARY KEY,
     source_person_id TEXT NOT NULL,
     target_person_id TEXT NOT NULL,
-    merge_type TEXT NOT NULL,       -- 'hard_identifier', 'soft_collision', 'manual'
+    merge_type TEXT NOT NULL,        -- 'hard_identifier', 'compound', 'soft_accumulation', 'manual'
     
-    triggering_facts TEXT,          -- JSON array of facts that caused merge
-    confidence REAL,
+    triggering_facts TEXT,           -- JSON array of facts that caused merge
+    similarity_score REAL,
     
-    status TEXT DEFAULT 'pending',  -- 'pending', 'accepted', 'rejected'
+    status TEXT DEFAULT 'pending',   -- 'pending', 'accepted', 'rejected', 'executed'
+    auto_eligible INTEGER DEFAULT 0, -- whether this can auto-execute
     
     created_at INTEGER NOT NULL,
     resolved_at INTEGER,
-    resolved_by TEXT                -- 'auto' or user action
+    resolved_by TEXT                 -- 'auto' or user identifier
 );
+
+CREATE INDEX idx_merge_events_status ON merge_events(status);
+CREATE INDEX idx_merge_events_persons ON merge_events(source_person_id, target_person_id);
 ```
 
 ---
@@ -314,64 +428,77 @@ CREATE TABLE merge_events (
 ## CLI Interface
 
 ```bash
-# Run extraction on top N contacts per channel
-comms identify extract [--top N] [--channel iMessage|gmail|all]
-
-# Run extraction on specific person
-comms identify extract --person <person_id>
+# Run PII extraction on conversations
+comms extract pii [--channel imessage|gmail|all] [--since 7d] [--top N]
+comms extract pii --conversation <conversation_id>
+comms extract pii --person <person_id>
 
 # View extraction status
-comms identify extractions [--status pending|complete]
+comms extract status [--pending|--completed|--failed]
+
+# Run identity resolution
+comms identify resolve [--full|--incremental]
+comms identify resolve --dry-run  # show what would merge
 
 # View person's identity graph
-comms person facts <person_id>
+comms person facts <person_id> [--include-evidence]
+comms person profile <person_id>  # rich formatted view
 
-# View pending merges
+# View merge suggestions
 comms identify merges [--status pending|accepted|rejected]
+comms identify merges --auto-eligible  # show what could auto-merge
 
-# Accept/reject a merge
-comms identify merge <merge_id> --accept|--reject
+# Accept/reject merges
+comms identify accept <merge_id>
+comms identify reject <merge_id>
+comms identify accept --all-auto  # accept all auto-eligible
 
 # Force merge two identities
-comms identify merge --force <person_id_1> <person_id_2>
+comms identify merge <person_id_1> <person_id_2> [--force]
 
-# View full person profile
-comms person show <person_id> [--include-evidence]
+# View resolution stats
+comms identify status
+# Shows: persons, merges executed, pending suggestions, unattributed facts
+
+# Resolve unattributed facts
+comms identify unattributed [--unresolved]
+comms identify attribute <fact_id> --person <person_id>
 ```
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Schema & Infrastructure
-- [ ] Add person_facts table
-- [ ] Add extraction_runs table  
-- [ ] Add merge_events table
-- [ ] Create fact insertion/query utilities
+### Phase 1: Schema & Infrastructure (US-030 - US-033)
+- [ ] Add person_facts table to schema
+- [ ] Add unattributed_facts table to schema
+- [ ] Add merge_events table to schema
+- [ ] Create fact insertion/query utilities in internal/identify/facts.go
 
-### Phase 2: Extraction Pipeline
-- [ ] Implement conversation chunking for comms events
-- [ ] Integrate PII extraction prompt
-- [ ] Build extraction job runner
-- [ ] Store facts with evidence links
+### Phase 2: PII Extraction Analysis Type (US-034 - US-037)
+- [ ] Register pii_extraction_v1 as analysis_type
+- [ ] Implement extraction job runner (uses analysis framework)
+- [ ] Build facet → person_facts sync job
+- [ ] Handle third-party identity creation from extraction
 
-### Phase 3: Identity Resolution
-- [ ] Implement hard identifier matching
-- [ ] Implement soft collision detection
-- [ ] Build merge suggestion system
-- [ ] Create merge execution logic
+### Phase 3: Resolution Algorithm (US-038 - US-042)
+- [ ] Implement identifier collision detection (O(F) algorithm)
+- [ ] Implement hard identifier merge logic
+- [ ] Implement compound identifier matching
+- [ ] Implement soft identifier scoring
+- [ ] Build merge execution with conflict detection
 
-### Phase 4: CLI & UI
-- [ ] Add extraction commands
-- [ ] Add merge review commands
-- [ ] Add person profile commands
-- [ ] Build fact browsing interface
+### Phase 4: CLI Commands (US-043 - US-047)
+- [ ] Add `comms extract pii` command
+- [ ] Add `comms identify resolve` command
+- [ ] Add `comms identify merges` commands
+- [ ] Add `comms person facts/profile` commands
+- [ ] Add `comms identify status` command
 
-### Phase 5: Bidirectional Extraction
-- [ ] Run on iMessage conversations
-- [ ] Run on Gmail threads
-- [ ] Run on AIX sessions
-- [ ] Cross-reference all channels
+### Phase 5: Channel Extraction (US-048 - US-050)
+- [ ] Run extraction on iMessage conversations
+- [ ] Run extraction on Gmail threads
+- [ ] Cross-channel resolution sweep
 
 ---
 
@@ -388,18 +515,34 @@ Incremental: Only new conversations, ~$0.50-1/week for active user.
 
 ---
 
-## Future Enhancements
+## Quality Metrics
 
-1. **Continuous extraction**: Run on new messages in real-time
-2. **Confidence decay**: Facts lose confidence if not re-confirmed over time
-3. **Conflict resolution**: Handle contradictory facts (two different birthdays)
-4. **Privacy controls**: Let users mark facts as "don't extract" or "private"
-5. **Export**: Export contact profiles as vCards with all facts
-6. **Search**: "Who works at Google?" → query person_facts
+```sql
+-- Resolution completeness
+SELECT 
+  (SELECT COUNT(*) FROM persons WHERE merged_into IS NULL) as active_persons,
+  (SELECT COUNT(*) FROM persons WHERE merged_into IS NOT NULL) as merged_persons,
+  (SELECT COUNT(*) FROM person_facts) as total_facts,
+  (SELECT COUNT(*) FROM person_facts WHERE is_hard_identifier = 1) as hard_identifiers,
+  (SELECT COUNT(*) FROM merge_events WHERE status = 'pending') as pending_merges,
+  (SELECT COUNT(*) FROM unattributed_facts WHERE resolved_to_person_id IS NULL) as unresolved_facts;
+
+-- Cross-channel linkage
+SELECT 
+  p.id,
+  p.canonical_name,
+  COUNT(DISTINCT pf.source_channel) as channels_linked
+FROM persons p
+JOIN person_facts pf ON p.id = pf.person_id
+WHERE p.merged_into IS NULL
+GROUP BY p.id
+ORDER BY channels_linked DESC;
+```
 
 ---
 
 ## Related Documents
 
-- **PII Extraction Prompt**: `/Users/tyler/nexus/home/projects/comms/prompts/pii-extraction-v1.prompt.md`
-- **Eve Migration Analysis**: `/Users/tyler/nexus/home/projects/comms/docs/EVE_COMMS_MIGRATION_ANALYSIS.md`
+- **PII Extraction Prompt**: `/prompts/pii-extraction-v1.prompt.md`
+- **Schema Design Analysis**: `/docs/SCHEMA_DESIGN_ANALYSIS.md`
+- **Eve Migration Analysis**: `/docs/EVE_COMMS_MIGRATION_ANALYSIS.md`

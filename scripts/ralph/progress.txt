@@ -435,3 +435,32 @@ Project: comms — Unified Communications Cartographer
   - Fresh databases get version 2, existing databases get new table but keep version 1 (acceptable)
   - Positioning threads table before sync_watermarks logically groups related tables
   - UNIQUE(source_adapter, source_id) ensures each external thread imported exactly once
+
+---
+
+## 2026-01-13 - US-017 Add attachments table to schema
+- Added attachments table to schema.sql with all required fields from design document
+- Created table with: id (PK), event_id (FK CASCADE), filename, mime_type, size_bytes
+- Added type hints: media_type (image/video/audio/document/sticker/link)
+- Added storage fields: storage_uri, storage_type (local/s3/url/inline)
+- Added deduplication support: content_hash field
+- Added source tracking: source_id for original attachment ID from source system
+- Added metadata_json for extensible metadata (width/height, duration, etc.)
+- Created four indexes: event_id, mime_type, media_type, content_hash
+- Incremented schema version from 2 to 3
+- Verified go build succeeds and comms init applies schema without error
+- **Files changed:**
+  - internal/db/schema.sql (added attachments table and indexes, incremented version to 3)
+  - scripts/ralph/prd.json (marked US-017 as passing)
+  - scripts/ralph/progress.txt (added US-017 learnings)
+- **Learnings:**
+  - Attachments table matches schema design document section 4 exactly
+  - Foreign key with ON DELETE CASCADE ensures orphaned attachment records are cleaned up
+  - Positioned attachments table immediately after threads table for logical grouping
+  - media_type provides queryable categorization (image/video/audio/etc.)
+  - storage_uri supports multiple storage backends (file://, s3://, https://)
+  - content_hash enables deduplication across events with same attachment
+  - metadata_json allows flexible storage of format-specific metadata without schema changes
+  - source_id preserves original attachment ID from source system for idempotent imports
+  - Schema version incremented in INSERT OR IGNORE statement at end of schema.sql
+  - Table comments match design document for clarity

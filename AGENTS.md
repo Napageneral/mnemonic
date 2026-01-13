@@ -216,6 +216,11 @@ make build
 - Schema versioning: INSERT OR IGNORE won't update existing version rows, but new installations get latest version
 - Threads table provides generic container abstraction for chats, email threads, channels, and sessions
 - Thread membership is NOT stored at thread level - derived from event_participants per-event (handles dynamic membership)
+- Attachments table stores media metadata with ON DELETE CASCADE - deleting event auto-deletes attachments
+- Attachment storage_uri supports multiple backends: file://, s3://, https:// URLs
+- Attachment content_hash enables deduplication - same file attached to multiple events
+- Attachment media_type (image/video/audio/document/sticker/link) provides queryable categorization
+- Attachment metadata_json stores format-specific data (dimensions, duration) without schema changes
 
 ## Schema Quick Reference
 
@@ -225,6 +230,7 @@ persons         -- People (one has is_me=1)
 identities      -- Phone/email/handle -> person
 event_participants  -- Who was in each event
 threads         -- Chat/channel/thread metadata
+attachments     -- Media/file metadata for events
 tags            -- Soft tags on events
 ```
 
