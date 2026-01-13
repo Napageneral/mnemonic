@@ -86,3 +86,22 @@ Started: (pending Eve migration completion)
   - Pattern: extraction creates unattributed fact, resolution moves to person_facts
 
 ---
+
+## 2026-01-13 - [US-032] Add merge_events table to schema
+- Added merge_events table to internal/db/schema.sql
+- Tracks full lifecycle of identity merges from suggestion to execution
+- Fields: id, source_person_id, target_person_id, merge_type, triggering_facts (JSON)
+- Status: pending, accepted, rejected, executed
+- auto_eligible flag for high-confidence matches (>=0.8 hard identifier collisions)
+- Audit trail: similarity_score, resolved_at, resolved_by
+- Two indexes: status for filtering workflows, (source, target) for deduplication
+- Schema version incremented from 5 to 6
+- Files changed: internal/db/schema.sql
+- **Learnings:**
+  - merge_events replaces merge_suggestions with richer state machine
+  - Supports both auto-merge flow and manual review flow
+  - triggering_facts as JSON allows storing arbitrary evidence
+  - resolved_by distinguishes 'auto' vs user-approved merges
+  - Composite index on (source, target) prevents duplicate suggestions
+
+---
