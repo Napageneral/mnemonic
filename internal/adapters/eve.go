@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +39,42 @@ func NewEveAdapter() (*EveAdapter, error) {
 
 func (e *EveAdapter) Name() string {
 	return "imessage"
+}
+
+// normalizePhoneEve normalizes phone numbers to E.164-ish format for consistent matching
+func normalizePhoneEve(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Keep + and digits only
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= '0' && r <= '9') || r == '+' {
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+
+	// Best-effort US normalization:
+	// - 10 digits -> +1XXXXXXXXXX
+	// - 11 digits starting with 1 -> +1XXXXXXXXXX
+	// - already has + -> leave
+	if strings.HasPrefix(out, "+") {
+		return out
+	}
+	digits := out
+	if len(digits) == 10 {
+		return "+1" + digits
+	}
+	if len(digits) == 11 && strings.HasPrefix(digits, "1") {
+		return "+" + digits
+	}
+	// For international numbers without +, just prepend +
+	if len(digits) > 10 {
+		return "+" + digits
+	}
+	return out
 }
 
 func (e *EveAdapter) Sync(ctx context.Context, commsDB *sql.DB, full bool) (SyncResult, error) {
@@ -248,7 +285,12 @@ func (e *EveAdapter) syncContacts(ctx context.Context, eveDB, commsDB *sql.DB) (
 			identityID := uuid.New().String()
 			now := time.Now().Unix()
 
-			_, _ = stmtInsertIdentity.Exec(identityID, personID, identifierType.String, identifier.String, now)
+			// Normalize phone numbers for consistent matching
+			ident := identifier.String
+			if identifierType.String == "phone" {
+				ident = normalizePhoneEve(ident)
+			}
+			_, _ = stmtInsertIdentity.Exec(identityID, personID, identifierType.String, ident, now)
 		}
 	}
 

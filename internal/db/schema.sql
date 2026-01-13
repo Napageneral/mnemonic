@@ -118,6 +118,40 @@ CREATE INDEX IF NOT EXISTS idx_threads_channel ON threads(channel);
 CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_thread_id);
 CREATE INDEX IF NOT EXISTS idx_threads_name ON threads(name);
 
+-- Attachments: Media/file metadata for events
+CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+
+    -- File metadata
+    filename TEXT,
+    mime_type TEXT,
+    size_bytes INTEGER,
+
+    -- Type hints
+    media_type TEXT,                       -- "image", "video", "audio", "document", "sticker", "link"
+
+    -- Storage location
+    storage_uri TEXT,                      -- file:///path, s3://bucket/key, https://url
+    storage_type TEXT,                     -- "local", "s3", "url", "inline"
+
+    -- Content hash for dedup
+    content_hash TEXT,
+
+    -- Source tracking
+    source_id TEXT,                        -- Original attachment ID from source
+
+    -- Additional metadata
+    metadata_json TEXT,                    -- Width/height for images, duration for video, etc.
+
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachments_event ON attachments(event_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_mime ON attachments(mime_type);
+CREATE INDEX IF NOT EXISTS idx_attachments_media_type ON attachments(media_type);
+CREATE INDEX IF NOT EXISTS idx_attachments_hash ON attachments(content_hash);
+
 -- Sync watermarks: Track last sync per adapter
 CREATE TABLE IF NOT EXISTS sync_watermarks (
     adapter TEXT PRIMARY KEY,
@@ -186,4 +220,4 @@ CREATE INDEX IF NOT EXISTS idx_merge_suggestions_person2 ON merge_suggestions(pe
 
 -- Insert initial schema version
 INSERT OR IGNORE INTO schema_version (version, applied_at)
-VALUES (2, strftime('%s', 'now'));
+VALUES (3, strftime('%s', 'now'));

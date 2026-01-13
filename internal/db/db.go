@@ -29,12 +29,17 @@ func Init() error {
 	}
 	defer db.Close()
 
+	// SQLite behaves best with a single connection per process.
+	// Multiple connections can contend for the write lock and cause SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
 	// Pragmas for performance + concurrency.
 	// WAL allows concurrent readers while a writer is active.
 	// busy_timeout reduces SQLITE_BUSY errors under contention.
 	_, _ = db.Exec("PRAGMA journal_mode = WAL")
 	_, _ = db.Exec("PRAGMA synchronous = NORMAL")
-	_, _ = db.Exec("PRAGMA busy_timeout = 5000")
+	_, _ = db.Exec("PRAGMA busy_timeout = 30000")
 	_, _ = db.Exec("PRAGMA foreign_keys = ON")
 
 	// Execute schema
@@ -59,6 +64,11 @@ func Open() (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// SQLite behaves best with a single connection per process.
+	// Multiple connections can contend for the write lock and cause SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
 	// Pragmas for performance + concurrency.
 	// WAL allows concurrent readers while a writer is active.
 	// busy_timeout reduces SQLITE_BUSY errors under contention.
@@ -70,7 +80,7 @@ func Open() (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("failed to set synchronous: %w", err)
 	}
-	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+	if _, err := db.Exec("PRAGMA busy_timeout = 30000"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
 	}
