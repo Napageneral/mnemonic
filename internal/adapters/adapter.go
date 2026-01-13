@@ -18,12 +18,14 @@ type Adapter interface {
 
 // SyncResult contains statistics about a sync operation
 type SyncResult struct {
-	EventsCreated  int
-	EventsUpdated  int
-	PersonsCreated int
-	ThreadsCreated int
-	ThreadsUpdated int
-	Duration       time.Duration
+	EventsCreated      int
+	EventsUpdated      int
+	PersonsCreated     int
+	ThreadsCreated     int
+	ThreadsUpdated     int
+	AttachmentsCreated int
+	AttachmentsUpdated int
+	Duration           time.Duration
 	// Perf is an optional breakdown of phase timings (human-readable durations).
 	Perf map[string]string `json:"perf,omitempty"`
 }

@@ -13,16 +13,18 @@ import (
 
 // AdapterResult contains the result of syncing a single adapter
 type AdapterResult struct {
-	AdapterName    string            `json:"adapter_name"`
-	Success        bool              `json:"success"`
-	Error          string            `json:"error,omitempty"`
-	EventsCreated  int               `json:"events_created"`
-	EventsUpdated  int               `json:"events_updated"`
-	PersonsCreated int               `json:"persons_created"`
-	ThreadsCreated int               `json:"threads_created"`
-	ThreadsUpdated int               `json:"threads_updated"`
-	Duration       string            `json:"duration"`
-	Perf           map[string]string `json:"perf,omitempty"`
+	AdapterName        string            `json:"adapter_name"`
+	Success            bool              `json:"success"`
+	Error              string            `json:"error,omitempty"`
+	EventsCreated      int               `json:"events_created"`
+	EventsUpdated      int               `json:"events_updated"`
+	PersonsCreated     int               `json:"persons_created"`
+	ThreadsCreated     int               `json:"threads_created"`
+	ThreadsUpdated     int               `json:"threads_updated"`
+	AttachmentsCreated int               `json:"attachments_created"`
+	AttachmentsUpdated int               `json:"attachments_updated"`
+	Duration           string            `json:"duration"`
+	Perf               map[string]string `json:"perf,omitempty"`
 }
 
 // SyncResult contains the results of syncing all adapters
@@ -252,17 +254,21 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 	result.PersonsCreated = syncResult.PersonsCreated
 	result.ThreadsCreated = syncResult.ThreadsCreated
 	result.ThreadsUpdated = syncResult.ThreadsUpdated
+	result.AttachmentsCreated = syncResult.AttachmentsCreated
+	result.AttachmentsUpdated = syncResult.AttachmentsUpdated
 	result.Duration = syncResult.Duration.String()
 	result.Perf = syncResult.Perf
 
 	_ = FinishJobSuccess(db, name, "sync", nil, map[string]any{
-		"events_created":  result.EventsCreated,
-		"events_updated":  result.EventsUpdated,
-		"persons_created": result.PersonsCreated,
-		"threads_created": result.ThreadsCreated,
-		"threads_updated": result.ThreadsUpdated,
-		"duration":        result.Duration,
-		"finished_at":     time.Now().Unix(),
+		"events_created":      result.EventsCreated,
+		"events_updated":      result.EventsUpdated,
+		"persons_created":     result.PersonsCreated,
+		"threads_created":     result.ThreadsCreated,
+		"threads_updated":     result.ThreadsUpdated,
+		"attachments_created": result.AttachmentsCreated,
+		"attachments_updated": result.AttachmentsUpdated,
+		"duration":            result.Duration,
+		"finished_at":         time.Now().Unix(),
 	})
 
 	return result

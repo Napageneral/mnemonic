@@ -160,6 +160,19 @@ func (e *EveAdapter) Sync(ctx context.Context, commsDB *sql.DB, full bool) (Sync
 	}
 	result.Perf["messages.total"] = time.Since(messagesStart).String()
 
+	// Sync attachments
+	attachmentsStart := time.Now()
+	attachmentsCreated, attachmentsUpdated, perfAttachments, err := e.syncAttachments(ctx, eveDB, commsDB, lastSyncTimestamp)
+	if err != nil {
+		return result, fmt.Errorf("failed to sync attachments: %w", err)
+	}
+	result.AttachmentsCreated = attachmentsCreated
+	result.AttachmentsUpdated = attachmentsUpdated
+	for k, v := range perfAttachments {
+		result.Perf["attachments."+k] = v
+	}
+	result.Perf["attachments.total"] = time.Since(attachmentsStart).String()
+
 	// Update sync watermark
 	// IMPORTANT: use the max imported event timestamp, NOT wall-clock time.
 	// This avoids skipping late-arriving/backfilled messages whose timestamp is older than "now".
@@ -805,4 +818,180 @@ func (e *EveAdapter) syncMessages(ctx context.Context, eveDB, commsDB *sql.DB, l
 	}
 	perf["tx_commit"] = time.Since(txStart).String()
 	return created, updated, maxImportedTimestamp, perf, nil
+}
+
+// syncAttachments syncs Eve attachments to comms attachments table
+func (e *EveAdapter) syncAttachments(ctx context.Context, eveDB, commsDB *sql.DB, lastSyncTimestamp int64) (created int, updated int, perf map[string]string, err error) {
+	_ = ctx
+	perf = map[string]string{}
+
+	adapterPrefix := e.Name() + ":"
+
+	// Query attachments from Eve, joining with messages to get timestamp for incremental sync
+	query := `
+		SELECT
+			a.id,
+			a.guid,
+			a.message_id,
+			a.file_name,
+			a.mime_type,
+			a.size,
+			a.is_sticker,
+			a.uti,
+			CAST(strftime('%s', a.created_date) AS INTEGER) as created_unix,
+			m.guid as message_guid
+		FROM attachments a
+		JOIN messages m ON a.message_id = m.id
+		WHERE CAST(strftime('%s', m.timestamp) AS INTEGER) > ?
+		ORDER BY a.id ASC
+	`
+
+	qStart := time.Now()
+	rows, err := eveDB.Query(query, lastSyncTimestamp)
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("failed to query Eve attachments: %w", err)
+	}
+	defer rows.Close()
+	perf["query"] = time.Since(qStart).String()
+
+	// Bulk write in a single transaction for SQLite performance
+	txStart := time.Now()
+	tx, err := commsDB.Begin()
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("begin comms tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmtInsertAttachment, err := tx.Prepare(`
+		INSERT INTO attachments (
+			id, event_id, filename, mime_type, size_bytes,
+			media_type, storage_uri, storage_type, content_hash,
+			source_id, metadata_json, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			filename = excluded.filename,
+			mime_type = excluded.mime_type,
+			size_bytes = excluded.size_bytes,
+			media_type = excluded.media_type,
+			storage_uri = excluded.storage_uri
+	`)
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("prepare insert attachment: %w", err)
+	}
+	defer stmtInsertAttachment.Close()
+
+	for rows.Next() {
+		var attachmentID int64
+		var guid string
+		var messageID int64
+		var fileName, mimeType, uti, messageGuid sql.NullString
+		var size sql.NullInt64
+		var isSticker bool
+		var createdUnix int64
+
+		if err := rows.Scan(&attachmentID, &guid, &messageID, &fileName, &mimeType, &size, &isSticker, &uti, &createdUnix, &messageGuid); err != nil {
+			return created, updated, perf, fmt.Errorf("failed to scan attachment row: %w", err)
+		}
+
+		// Build comms event ID from message GUID
+		eventID := adapterPrefix + messageGuid.String
+
+		// Derive media_type from mime_type and is_sticker flag
+		mediaType := deriveMediaType(mimeType.String, isSticker)
+
+		// Build storage_uri - for now, we don't have the actual file path from Eve
+		// Store the attachment GUID as reference
+		storageURI := ""
+		if fileName.Valid && fileName.String != "" {
+			// If we had the actual path, we'd use file:// URI scheme
+			// For now, store a placeholder that indicates the source
+			storageURI = "eve://" + guid
+		}
+
+		// Build metadata_json with additional fields
+		metadataJSON := ""
+		if uti.Valid && uti.String != "" {
+			metadataJSON = fmt.Sprintf(`{"uti":"%s","is_sticker":%v}`, uti.String, isSticker)
+		} else {
+			metadataJSON = fmt.Sprintf(`{"is_sticker":%v}`, isSticker)
+		}
+
+		// Deterministic attachment ID
+		attachmentCommsID := adapterPrefix + guid
+
+		// Check if attachment already exists to determine created vs updated
+		var existingID string
+		err := tx.QueryRow("SELECT id FROM attachments WHERE id = ?", attachmentCommsID).Scan(&existingID)
+		wasCreated := (err == sql.ErrNoRows)
+
+		// Insert or update attachment
+		_, err = stmtInsertAttachment.Exec(
+			attachmentCommsID,
+			eventID,
+			fileName.String,
+			mimeType.String,
+			size.Int64,
+			mediaType,
+			storageURI,
+			"local", // storage_type
+			"",      // content_hash (not available from Eve)
+			guid,    // source_id
+			metadataJSON,
+			createdUnix,
+		)
+		if err != nil {
+			return created, updated, perf, fmt.Errorf("upsert attachment: %w", err)
+		}
+
+		if wasCreated {
+			created++
+		} else {
+			updated++
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return created, updated, perf, err
+	}
+	if err := tx.Commit(); err != nil {
+		return created, updated, perf, fmt.Errorf("commit comms tx: %w", err)
+	}
+	perf["tx_commit"] = time.Since(txStart).String()
+	return created, updated, perf, nil
+}
+
+// deriveMediaType determines the media_type category from mime_type
+func deriveMediaType(mimeType string, isSticker bool) string {
+	if isSticker {
+		return "sticker"
+	}
+
+	mimeType = strings.ToLower(mimeType)
+
+	// Image types
+	if strings.HasPrefix(mimeType, "image/") {
+		return "image"
+	}
+
+	// Video types
+	if strings.HasPrefix(mimeType, "video/") {
+		return "video"
+	}
+
+	// Audio types
+	if strings.HasPrefix(mimeType, "audio/") {
+		return "audio"
+	}
+
+	// Document types
+	if strings.HasPrefix(mimeType, "application/pdf") ||
+		strings.HasPrefix(mimeType, "application/msword") ||
+		strings.HasPrefix(mimeType, "application/vnd.openxmlformats-officedocument") ||
+		strings.HasPrefix(mimeType, "application/vnd.ms-") ||
+		strings.HasPrefix(mimeType, "text/") {
+		return "document"
+	}
+
+	// Default to document for unknown types
+	return "document"
 }

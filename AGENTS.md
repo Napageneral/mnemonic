@@ -251,6 +251,14 @@ make build
 - Thread name prefers chat_name from Eve, falls back to chat_identifier
 - Events already linked to threads via thread_id field (no schema change needed)
 - SyncResult includes ThreadsCreated and ThreadsUpdated counts for tracking
+- Eve adapter syncs attachment metadata from Eve attachments table
+- Attachment ID format: adapter_name:guid (e.g., "imessage:att123")
+- Attachment media_type derived from mime_type: image/video/audio/document/sticker
+- Attachment storage_uri uses eve:// scheme as placeholder (actual file path not in Eve)
+- Attachment metadata_json stores uti and is_sticker flag from Eve
+- deriveMediaType function categorizes mime_types into queryable media_type enum
+- SyncResult includes AttachmentsCreated and AttachmentsUpdated counts for tracking
+- Attachment sync happens after messages sync, uses same watermark for incremental sync
 
 ## Schema Quick Reference
 

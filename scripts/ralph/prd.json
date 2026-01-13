@@ -92,7 +92,7 @@
         "comms sync --adapter imessage creates threads"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "First step of Eve direct ETL. Thread metadata now captured."
     },
     {
