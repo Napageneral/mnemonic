@@ -1,227 +1,164 @@
 {
   "branchName": "main",
   "projectName": "comms",
-  "description": "Unified Communications Cartographer - aggregates communications across channels into a single queryable event store",
+  "description": "Eve→Comms migration: Add threads, attachments, conversations, analysis framework, and embeddings",
+  "specFiles": [
+    "docs/SCHEMA_DESIGN_ANALYSIS.md"
+  ],
   "userStories": [
     {
-      "id": "US-001",
-      "title": "Project scaffolding",
+      "id": "US-016",
+      "title": "Add threads table to schema",
       "acceptanceCriteria": [
-        "go.mod with correct module path (github.com/Napageneral/comms)",
-        "Makefile with build, install, test, clean targets",
-        ".goreleaser.yaml for releases",
-        "main.go with cobra root command",
-        "version command works",
-        "go build succeeds"
+        "threads table created in schema.sql with: id, channel, name, source_adapter, source_id, parent_thread_id, created_at, updated_at",
+        "UNIQUE constraint on (source_adapter, source_id)",
+        "Indexes on channel, parent_thread_id, name",
+        "Schema version incremented",
+        "go build succeeds",
+        "comms init applies new schema without error"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Use modernc.org/sqlite for pure-Go SQLite"
+      "notes": "See docs/SCHEMA_DESIGN_ANALYSIS.md section 2. No is_group field - derived from event_participants."
     },
     {
-      "id": "US-002",
-      "title": "Init command creates config and database",
+      "id": "US-017",
+      "title": "Add attachments table to schema",
       "acceptanceCriteria": [
-        "comms init creates ~/.config/comms/",
-        "comms init creates ~/Library/Application Support/Comms/",
-        "comms init creates comms.db with schema",
-        "Running init twice is idempotent",
-        "JSON output shows paths created"
+        "attachments table created with: id, event_id, filename, mime_type, size_bytes, media_type, storage_uri, storage_type, content_hash, source_id, metadata_json, created_at",
+        "Foreign key to events(id) with ON DELETE CASCADE",
+        "Indexes on event_id, mime_type, media_type, content_hash",
+        "Schema version incremented",
+        "go build succeeds"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "XDG-compliant paths"
+      "passes": false,
+      "notes": "See docs/SCHEMA_DESIGN_ANALYSIS.md section 4"
     },
     {
-      "id": "US-003",
-      "title": "Database schema for events, persons, identities",
+      "id": "US-018",
+      "title": "Add conversation abstraction tables to schema",
       "acceptanceCriteria": [
-        "events table with: id, timestamp, channel, content_types, content, direction, thread_id, reply_to, source_adapter, source_id",
-        "persons table with: id, canonical_name, display_name, is_me, relationship_type",
-        "identities table with: id, person_id, channel, identifier (unique on channel+identifier)",
-        "event_participants table with: event_id, person_id, role",
-        "tags table with: id, event_id, tag_type, value, confidence, source",
-        "Appropriate indexes on timestamp, person_id, channel",
-        "Schema versioning/migrations support"
+        "conversation_definitions table: id, name (UNIQUE), channel, strategy, config_json, description, created_at, updated_at",
+        "conversations table: id, definition_id (FK), channel, thread_id (FK to threads), start_time, end_time, event_count, first_event_id, last_event_id, created_at",
+        "conversation_events table: conversation_id (FK), event_id (FK), position, PRIMARY KEY (conversation_id, event_id)",
+        "Indexes on definition_id, channel, thread_id, time range, event_id",
+        "Schema version incremented",
+        "go build succeeds"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Schema in internal/db/schema.sql, completed in US-002"
+      "passes": false,
+      "notes": "See docs/SCHEMA_DESIGN_ANALYSIS.md section 5. Events do NOT get conversation_id FK."
     },
     {
-      "id": "US-004",
-      "title": "Me command to configure user identity",
+      "id": "US-019",
+      "title": "Add analysis framework tables to schema",
       "acceptanceCriteria": [
-        "comms me set --name 'Tyler Brandt' creates person with is_me=true",
-        "comms me set --phone '+17072876731' adds identity",
-        "comms me set --email 'email@example.com' adds identity",
-        "comms me show displays current identity config",
-        "Only one person can have is_me=true"
+        "analysis_types table: id, name (UNIQUE), version, description, output_type, facets_config_json, prompt_template, model, created_at, updated_at",
+        "analysis_runs table: id, analysis_type_id (FK), conversation_id (FK), status, started_at, completed_at, output_text, error_message, blocked_reason, retry_count, created_at, UNIQUE(analysis_type_id, conversation_id)",
+        "facets table: id, analysis_run_id (FK CASCADE), conversation_id (FK CASCADE), facet_type, value, person_id (FK), confidence, metadata_json, created_at",
+        "Indexes on type, conversation, status, facet_type+value, person_id",
+        "Schema version incremented",
+        "go build succeeds"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Transaction-based implementation with JSON output support"
+      "passes": false,
+      "notes": "See docs/SCHEMA_DESIGN_ANALYSIS.md section 6"
     },
     {
-      "id": "US-005",
-      "title": "Adapters command to list and manage adapters",
+      "id": "US-020",
+      "title": "Add embeddings table to schema",
       "acceptanceCriteria": [
-        "comms adapters lists configured adapters with status",
-        "comms connect imessage configures iMessage adapter",
-        "comms connect gmail --account <email> configures Gmail adapter",
-        "Adapter config stored in config.yaml",
-        "JSON output support"
+        "embeddings table: id, entity_type, entity_id, model, embedding_blob (BLOB), dimension, source_text_hash, created_at",
+        "UNIQUE constraint on (entity_type, entity_id, model)",
+        "Indexes on entity_type+entity_id, model",
+        "Schema version incremented",
+        "go build succeeds"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "Adapters: imessage (eve), gmail (gogcli), cursor (aix)"
+      "passes": false,
+      "notes": "See docs/SCHEMA_DESIGN_ANALYSIS.md section 7"
     },
     {
-      "id": "US-006",
-      "title": "Eve adapter pulls events from Eve database",
+      "id": "US-021",
+      "title": "Eve adapter creates threads from chats",
       "acceptanceCriteria": [
-        "Reads from Eve's SQLite database (eve.db)",
-        "Maps Eve messages to comms event schema",
-        "Maps Eve contacts to persons with identities",
-        "Handles conversation threading",
-        "Tracks sync watermark for incremental sync",
-        "Direction: is_from_me -> sent, else received"
+        "Eve adapter creates thread records from Eve chats table",
+        "Thread name from Eve chat_name or chat_identifier",
+        "source_adapter='imessage', source_id=chat_identifier",
+        "Events linked to threads via thread_id field",
+        "Incremental sync maintains thread references",
+        "go build succeeds",
+        "comms sync --adapter imessage creates threads"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "Eve db at ~/Library/Application Support/Eve/eve.db"
+      "passes": false,
+      "notes": "First step of Eve direct ETL. Thread metadata now captured."
     },
     {
-      "id": "US-007",
-      "title": "Sync command orchestrates adapter sync",
+      "id": "US-022",
+      "title": "Eve adapter imports attachment metadata",
       "acceptanceCriteria": [
-        "comms sync runs all enabled adapters",
-        "comms sync --adapter imessage runs specific adapter",
-        "comms sync --full forces full re-sync",
-        "Reports events synced per adapter",
-        "Handles errors gracefully (one adapter failing doesn't stop others)",
-        "JSON output with sync stats"
+        "Eve adapter reads from Eve attachments table",
+        "Creates attachment records with filename, mime_type, size_bytes",
+        "media_type derived from mime_type (image/video/audio/document/sticker)",
+        "storage_uri points to file path from Eve",
+        "storage_type='local'",
+        "content_hash from Eve if available",
+        "go build succeeds",
+        "comms sync --adapter imessage populates attachments table"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "Implemented with internal/sync package. Supports --adapter and --full flags."
+      "passes": false,
+      "notes": "Preserves attachment metadata that was previously lost"
     },
     {
-      "id": "US-008",
-      "title": "Union-find identity resolution",
+      "id": "US-023",
+      "title": "Eve adapter syncs reactions as events",
       "acceptanceCriteria": [
-        "comms identify lists all persons with their identities",
-        "comms identify --search 'Dad' finds matching persons",
-        "comms identify --merge 'Person A' 'Person B' unions them",
-        "Merge updates all event_participants to use canonical person",
-        "comms identify --add 'Dad' --email 'dad@example.com' adds identity",
-        "Duplicate identifier detection and user confirmation"
+        "Eve adapter reads from Eve reactions table",
+        "Creates event records with content_types=['reaction']",
+        "content field contains the reaction emoji/type",
+        "reply_to field references the reacted event's ID",
+        "direction determined by is_from_me",
+        "go build succeeds",
+        "comms sync --adapter imessage imports reactions"
       ],
       "priority": 8,
-      "passes": true,
-      "notes": "Implemented with internal/identify package. Supports list, search, merge, and add operations."
+      "passes": false,
+      "notes": "Reactions are events with special content_type. See schema design section 3."
     },
     {
-      "id": "US-009",
-      "title": "Events query command with filters",
+      "id": "US-024",
+      "title": "Time-gap conversation chunking for iMessage",
       "acceptanceCriteria": [
-        "comms events lists recent events",
-        "comms events --person 'Dad' filters by person",
-        "comms events --channel imessage filters by channel",
-        "comms events --since 2025-01-01 filters by date",
-        "comms events --until 2025-12-31 filters by date",
-        "comms events --direction sent filters by direction",
-        "Filters are combinable",
-        "JSON output with event details"
+        "internal/chunk package created with Chunker interface",
+        "TimeGapChunker implements chunking with configurable gap threshold",
+        "Default conversation_definition created: 'imessage_3hr' with 10800 second gap",
+        "comms chunk command runs chunking for a definition",
+        "Creates conversation records with event_count, time bounds",
+        "Creates conversation_events mapping records",
+        "go build succeeds",
+        "comms chunk --definition imessage_3hr creates conversations"
       ],
       "priority": 9,
-      "passes": true,
-      "notes": "Implemented with internal/query package. Supports --limit flag (default 100). Dynamic SQL building for combinable filters."
+      "passes": false,
+      "notes": "Port from Eve internal/etl/conversations.go. Strategy='time_gap', scope by thread."
     },
     {
-      "id": "US-010",
-      "title": "People command lists contacts",
+      "id": "US-025",
+      "title": "Thread-based conversation chunking for Gmail",
       "acceptanceCriteria": [
-        "comms people lists all persons",
-        "comms people --top 20 sorts by event count",
-        "comms people --search 'John' searches by name",
-        "comms people 'Dad' shows person details with identities and stats",
-        "JSON output"
+        "ThreadChunker implements chunking using events.thread_id",
+        "Default conversation_definition created: 'gmail_thread' with strategy='thread'",
+        "Each unique thread_id in gmail channel becomes one conversation",
+        "Events ordered by timestamp within conversation",
+        "go build succeeds",
+        "comms chunk --definition gmail_thread creates conversations"
       ],
       "priority": 10,
-      "passes": true,
-      "notes": "Implemented. Reuses identify package functions for consistency."
-    },
-    {
-      "id": "US-011",
-      "title": "Timeline command for temporal view",
-      "acceptanceCriteria": [
-        "comms timeline 2026-01 shows events in January 2026",
-        "comms timeline 2026-01-15 shows events on specific date",
-        "comms timeline --today shows today's events",
-        "comms timeline --week shows this week",
-        "Groups events by date with counts per person/channel",
-        "JSON output"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": "Implemented with internal/timeline package. Supports flexible date parsing (YYYY, YYYY-MM, YYYY-MM-DD) and aggregates by sender/channel/direction."
-    },
-    {
-      "id": "US-012",
-      "title": "Tags command for soft tagging",
-      "acceptanceCriteria": [
-        "comms tag list shows all tags",
-        "comms tag add --event <id> --tag 'project:htaa' adds tag to event",
-        "comms tag add --filter 'person:Dane' --tag 'context:business' bulk tags",
-        "Tags have type (topic, entity, project, context) and value",
-        "Tags can be user-applied or analysis-discovered"
-      ],
-      "priority": 12,
-      "passes": true,
-      "notes": "Implemented with internal/tag package. Supports single event tagging and bulk tagging with filters (person, channel, since, until)."
-    },
-    {
-      "id": "US-013",
-      "title": "DB query command for raw SQL access",
-      "acceptanceCriteria": [
-        "comms db query 'SELECT COUNT(*) FROM events' runs query",
-        "Only SELECT statements allowed without --write flag",
-        "comms db query --write 'UPDATE...' allows mutations",
-        "JSON output of query results",
-        "Handles errors gracefully"
-      ],
-      "priority": 13,
-      "passes": true,
-      "notes": "Implemented with mutation detection and --write flag protection. Supports text and JSON output."
-    },
-    {
-      "id": "US-014",
-      "title": "Gmail adapter pulls events from gogcli",
-      "acceptanceCriteria": [
-        "Runs gog gmail search to fetch threads",
-        "Maps Gmail threads/messages to comms events",
-        "Extracts participants from to/from/cc fields",
-        "Maps email addresses to identities",
-        "Handles threading via Gmail thread_id",
-        "Tracks sync watermark (last sync date)"
-      ],
-      "priority": 14,
-      "passes": true,
-      "notes": "Implemented. Calls gogcli with --json flag, parses threads and messages, creates identities with channel='email'."
-    },
-    {
-      "id": "US-015",
-      "title": "SKILL.md for Nexus integration",
-      "acceptanceCriteria": [
-        "SKILL.md follows nexus skill format",
-        "Documents all commands",
-        "Includes bootstrap instructions for AI agents",
-        "Includes examples of common workflows"
-      ],
-      "priority": 15,
-      "passes": true,
-      "notes": "Pattern from Eve's SKILL.md"
+      "passes": false,
+      "notes": "Gmail already has thread_id from API. One conversation per thread."
     }
   ]
 }

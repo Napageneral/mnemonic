@@ -101,6 +101,23 @@ CREATE TABLE IF NOT EXISTS tags (
 CREATE INDEX IF NOT EXISTS idx_tags_event ON tags(event_id);
 CREATE INDEX IF NOT EXISTS idx_tags_type_value ON tags(tag_type, value);
 
+-- Threads: Grouping containers for events (chats, email threads, channels, sessions)
+CREATE TABLE IF NOT EXISTS threads (
+    id TEXT PRIMARY KEY,
+    channel TEXT NOT NULL,
+    name TEXT,
+    source_adapter TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    parent_thread_id TEXT REFERENCES threads(id),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(source_adapter, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_threads_channel ON threads(channel);
+CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_thread_id);
+CREATE INDEX IF NOT EXISTS idx_threads_name ON threads(name);
+
 -- Sync watermarks: Track last sync per adapter
 CREATE TABLE IF NOT EXISTS sync_watermarks (
     adapter TEXT PRIMARY KEY,
@@ -169,4 +186,4 @@ CREATE INDEX IF NOT EXISTS idx_merge_suggestions_person2 ON merge_suggestions(pe
 
 -- Insert initial schema version
 INSERT OR IGNORE INTO schema_version (version, applied_at)
-VALUES (1, strftime('%s', 'now'));
+VALUES (2, strftime('%s', 'now'));
