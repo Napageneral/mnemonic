@@ -212,6 +212,10 @@ make build
 - Email addresses stored as identities with channel='email', used for person resolution
 - Type assertions required when reading config.Options map[string]interface{}
 - exec.LookPath checks if command is available in PATH before creating adapter
+- Schema evolution: Use CREATE TABLE IF NOT EXISTS for safe migrations on existing databases
+- Schema versioning: INSERT OR IGNORE won't update existing version rows, but new installations get latest version
+- Threads table provides generic container abstraction for chats, email threads, channels, and sessions
+- Thread membership is NOT stored at thread level - derived from event_participants per-event (handles dynamic membership)
 
 ## Schema Quick Reference
 
@@ -220,6 +224,7 @@ events          -- All communication events
 persons         -- People (one has is_me=1)
 identities      -- Phone/email/handle -> person
 event_participants  -- Who was in each event
+threads         -- Chat/channel/thread metadata
 tags            -- Soft tags on events
 ```
 

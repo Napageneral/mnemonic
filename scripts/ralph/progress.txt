@@ -415,3 +415,23 @@ Project: comms — Unified Communications Cartographer
   - Bootstrap section should be concrete and executable (not just conceptual)
   - AI agent tips should include realistic example queries with expected workflows
   - SKILL.md lives at project root for easy discovery by both humans and tooling
+
+---
+
+## 2026-01-13 - US-016 Add threads table to schema
+- Added threads table to schema.sql with all required fields (id, channel, name, source_adapter, source_id, parent_thread_id, created_at, updated_at)
+- Added UNIQUE constraint on (source_adapter, source_id) to prevent duplicate thread imports
+- Created three indexes: idx_threads_channel, idx_threads_parent, idx_threads_name
+- Incremented schema version from 1 to 2
+- Verified go build succeeds and comms init applies schema without error
+- **Files changed:**
+  - internal/db/schema.sql (added threads table and indexes, incremented version to 2)
+  - scripts/ralph/prd.json (marked US-016 as passing)
+- **Learnings:**
+  - Threads table is generic container for chats, email threads, channels, sessions across all adapters
+  - No is_group field - group status derived from event_participants (per design doc section 2)
+  - Parent thread support via self-referencing foreign key (for Slack/Discord thread-in-channel pattern)
+  - Schema version uses INSERT OR IGNORE which won't update existing databases, but CREATE TABLE IF NOT EXISTS allows safe schema evolution
+  - Fresh databases get version 2, existing databases get new table but keep version 1 (acceptable)
+  - Positioning threads table before sync_watermarks logically groups related tables
+  - UNIQUE(source_adapter, source_id) ensures each external thread imported exactly once
