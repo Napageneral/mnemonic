@@ -301,6 +301,62 @@ CREATE TABLE IF NOT EXISTS merge_events (
 CREATE INDEX IF NOT EXISTS idx_merge_events_status ON merge_events(status);
 CREATE INDEX IF NOT EXISTS idx_merge_events_persons ON merge_events(source_person_id, target_person_id);
 
+-- Conversation definitions: HOW to chunk events into conversations
+CREATE TABLE IF NOT EXISTS conversation_definitions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,             -- "imessage_90min", "gmail_thread", "cross_channel_persona"
+
+    -- Scope (what events to consider)
+    channel TEXT,                          -- NULL = all channels, or specific channel
+
+    -- Strategy
+    strategy TEXT NOT NULL,                -- "time_gap", "thread", "session", "daily", "persona_pair", "custom"
+    config_json TEXT NOT NULL,             -- Strategy-specific config
+
+    description TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- Conversations: instances produced by applying a definition
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    definition_id TEXT NOT NULL REFERENCES conversation_definitions(id),
+
+    -- Scope info (denormalized for queries)
+    -- These can be NULL for cross-channel/cross-thread conversations
+    channel TEXT,                          -- NULL if spans multiple channels
+    thread_id TEXT REFERENCES threads(id), -- NULL if spans multiple threads
+
+    -- Time bounds
+    start_time INTEGER NOT NULL,
+    end_time INTEGER NOT NULL,
+
+    -- Stats
+    event_count INTEGER NOT NULL,
+
+    -- Convenience refs
+    first_event_id TEXT,
+    last_event_id TEXT,
+
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_definition ON conversations(definition_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
+CREATE INDEX IF NOT EXISTS idx_conversations_thread ON conversations(thread_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_time ON conversations(start_time, end_time);
+
+-- Conversation events: which events belong to which conversation
+CREATE TABLE IF NOT EXISTS conversation_events (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,             -- order within conversation (1-indexed)
+    PRIMARY KEY (conversation_id, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_events_event ON conversation_events(event_id);
+
 -- Insert initial schema version
 INSERT OR IGNORE INTO schema_version (version, applied_at)
-VALUES (6, strftime('%s', 'now'));
+VALUES (7, strftime('%s', 'now'));

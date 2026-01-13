@@ -227,6 +227,13 @@ make build
 - Hard identifier facts flagged with is_hard_identifier=1 for O(F) collision detection
 - Conditional indexes (WHERE clause) enable efficient hard identifier queries without full table scan
 - Schema version managed via INSERT OR IGNORE - only applies on fresh installations
+- Conversation abstraction: events are immutable, conversations are views over events via mapping table
+- Conversations can span multiple threads/channels (channel=NULL, thread_id=NULL for cross-boundary convos)
+- conversation_definitions define chunking strategy: time_gap, thread, session, daily, persona_pair, custom
+- config_json stores strategy-specific parameters (e.g., gap_seconds for time_gap)
+- conversation_events.position tracks order within conversation (1-indexed)
+- Same events can belong to multiple conversations with different definitions (e.g., 90min vs 3hr gaps)
+- Events do NOT have conversation_id FK - use conversation_events mapping for flexibility
 
 ## Schema Quick Reference
 
@@ -241,6 +248,9 @@ tags            -- Soft tags on events
 person_facts    -- Rich identity graph data (PII extraction results)
 unattributed_facts  -- Ambiguous data that couldn't be attributed (resolvable later)
 merge_events    -- Identity merge proposals and execution tracking
+conversation_definitions  -- HOW to chunk events into conversations
+conversations   -- Chunked groups of events (time-gap, thread-based, etc.)
+conversation_events  -- Mapping table: which events belong to which conversations
 ```
 
 See `internal/db/schema.sql` for full DDL.
