@@ -1180,6 +1180,8 @@ queryable event store with identity resolution.`,
 						fmt.Printf("  Events created: %d\n", adapterResult.EventsCreated)
 						fmt.Printf("  Events updated: %d\n", adapterResult.EventsUpdated)
 						fmt.Printf("  Persons created: %d\n", adapterResult.PersonsCreated)
+						fmt.Printf("  Threads created: %d\n", adapterResult.ThreadsCreated)
+						fmt.Printf("  Threads updated: %d\n", adapterResult.ThreadsUpdated)
 						fmt.Printf("  Duration: %s\n", adapterResult.Duration)
 						if len(adapterResult.Perf) > 0 {
 							// Print a few high-signal perf keys if present.

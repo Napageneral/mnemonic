@@ -19,6 +19,8 @@ type AdapterResult struct {
 	EventsCreated  int               `json:"events_created"`
 	EventsUpdated  int               `json:"events_updated"`
 	PersonsCreated int               `json:"persons_created"`
+	ThreadsCreated int               `json:"threads_created"`
+	ThreadsUpdated int               `json:"threads_updated"`
 	Duration       string            `json:"duration"`
 	Perf           map[string]string `json:"perf,omitempty"`
 }
@@ -248,6 +250,8 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 	result.EventsCreated = syncResult.EventsCreated
 	result.EventsUpdated = syncResult.EventsUpdated
 	result.PersonsCreated = syncResult.PersonsCreated
+	result.ThreadsCreated = syncResult.ThreadsCreated
+	result.ThreadsUpdated = syncResult.ThreadsUpdated
 	result.Duration = syncResult.Duration.String()
 	result.Perf = syncResult.Perf
 
@@ -255,6 +259,8 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 		"events_created":  result.EventsCreated,
 		"events_updated":  result.EventsUpdated,
 		"persons_created": result.PersonsCreated,
+		"threads_created": result.ThreadsCreated,
+		"threads_updated": result.ThreadsUpdated,
 		"duration":        result.Duration,
 		"finished_at":     time.Now().Unix(),
 	})

@@ -246,6 +246,11 @@ make build
 - embedding_blob stores binary vector as little-endian float64 array
 - source_text_hash enables change detection for re-embedding when source changes
 - Multiple embedding models can coexist: same entity embedded with different models stored separately
+- Eve adapter syncs threads from chats table before syncing messages
+- Thread ID format: adapter_name:source_id (e.g., "imessage:chat123")
+- Thread name prefers chat_name from Eve, falls back to chat_identifier
+- Events already linked to threads via thread_id field (no schema change needed)
+- SyncResult includes ThreadsCreated and ThreadsUpdated counts for tracking
 
 ## Schema Quick Reference
 

@@ -542,3 +542,35 @@ Project: comms — Unified Communications Cartographer
   - Two indexes optimize common access patterns: lookup by entity and filter by model
   - Embeddings are independent from entities - no foreign keys, enables embedding anything
   - Schema version incremented in INSERT OR IGNORE statement at end of schema.sql
+
+---
+
+## 2026-01-13 - US-021 Eve adapter creates threads from chats
+- Modified Eve adapter to sync chats table to threads table before syncing messages
+- Added syncChats function that queries Eve chats and creates thread records
+- Thread ID format: adapter_name:source_id (e.g., "imessage:chat123")
+- Thread name prefers chat_name from Eve, falls back to chat_identifier
+- Added ThreadsCreated and ThreadsUpdated fields to SyncResult struct
+- Updated sync output display to show thread creation/update counts
+- Events already linked to threads via existing thread_id field (no event table changes needed)
+- Incremental sync maintains thread references through upsert pattern
+- Verified go build succeeds
+- **Files changed:**
+  - internal/adapters/eve.go (added syncChats function, integrated into Sync flow)
+  - internal/adapters/adapter.go (added ThreadsCreated/ThreadsUpdated to SyncResult)
+  - internal/sync/sync.go (added thread counts to AdapterResult and job progress)
+  - cmd/comms/main.go (added thread counts to sync output display)
+  - AGENTS.md (added thread sync patterns to Gotchas)
+  - scripts/ralph/progress.txt (added US-021 learnings)
+- **Learnings:**
+  - Thread sync happens before message sync to ensure thread metadata is available
+  - Use ON CONFLICT DO UPDATE for idempotent thread upserts (safe for repeated syncs)
+  - Thread creation is separate from message sync for clean separation of concerns
+  - Deterministic thread IDs (adapter:source_id) enable consistent references across syncs
+  - Thread name can be updated on subsequent syncs if chat_name changes in Eve
+  - No need to modify events table - thread_id already exists and is populated correctly
+  - Messages query already uses chat_identifier as thread_id via JOIN with chats table
+  - SyncResult struct extended without breaking existing adapter implementations
+  - Perf tracking includes separate timings for chats.query and chats.tx_commit
+  - Thread sync is a separate transaction from message sync for independent failure handling
+

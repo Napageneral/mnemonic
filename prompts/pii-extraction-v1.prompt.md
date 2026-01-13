@@ -121,23 +121,38 @@ Extract any of the following categories if present:
 | next_of_kin | Next of kin | Legal designation |
 
 ### 6. Professional
+
+**IMPORTANT**: Distinguish between EMPLOYMENT (working FOR someone) vs OWNERSHIP (owning a business).
+
 | Field | Description | Examples |
 |-------|-------------|----------|
-| employer_current | Current employer | "Napa General Store" |
+| **EMPLOYMENT** | *Working FOR a company* | |
+| employer_current | Current employer (company you work FOR) | "Google", "works at Apple" |
 | employer_previous | Past employers | Former jobs |
-| job_title | Current job title | "Owner", "Manager" |
+| job_title_current | Current job title | "Senior Engineer", "Manager" |
+| job_title_previous | Previous job titles | Former titles |
 | department | Department/team | "Sales", "Engineering" |
-| role_description | What they do | "runs the store" |
-| work_email | Work email | See contact info |
-| work_phone | Work phone | See contact info |
-| work_address | Office location | See contact info |
-| employee_id | Employee number | If mentioned |
+| role_description | What they do day-to-day | "manages the sales team" |
 | manager | Their manager | "reports to Sarah" |
 | direct_reports | People they manage | "manages 5 people" |
 | colleagues | Coworkers mentioned | "works with Tom" |
-| business_partners | Business partners | "partner with Mike" |
-| industry | Industry they work in | "retail", "tech" |
+| employee_id | Employee number | If mentioned |
+| **OWNERSHIP** | *Owning/founding a business* | |
+| business_owned | Businesses they OWN (array) | ["Napa General Store"] |
+| business_role | Role in owned business | "Owner", "Co-owner", "Partner", "Founder" |
+| business_founded | Businesses they started | "started the company in 2005" |
+| business_invested | Businesses invested in | "angel investor in StartupX" |
+| board_member_of | Board positions | "on the board of NonprofitY" |
+| **GENERAL** | *Professional identity* | |
+| profession | What they do (not where) | "restaurateur", "engineer" |
+| industry | Industry they work in | "retail", "tech", "hospitality" |
 | years_experience | Experience level | "20 years in retail" |
+| professional_certifications | Certifications | "CPA", "PMP" |
+| professional_licenses | Licenses held | "Real estate license" |
+| work_email | Work email | See contact info |
+| work_phone | Work phone | See contact info |
+| work_address | Office location | See contact info |
+| business_partners | Business partners | "partner with Mike" |
 | salary | Salary if mentioned | Flag as sensitive |
 | work_schedule | Work hours/days | "works weekends" |
 
@@ -343,15 +358,20 @@ Extract any of the following categories if present:
           }
         },
         "professional": {
-          "employer_current": {
-            "value": "Napa General Store",
+          "business_owned": {
+            "value": ["Napa General Store"],
             "confidence": "high",
-            "evidence": ["jim@napageneralstore.com", "napageneral username"]
+            "evidence": ["jim@napageneralstore.com", "owns the store", "napageneral username"]
           },
-          "job_title": {
+          "business_role": {
             "value": "Owner",
+            "confidence": "high",
+            "evidence": ["runs the store", "his business"]
+          },
+          "profession": {
+            "value": "Small Business Owner / Restaurateur",
             "confidence": "medium",
-            "evidence": ["implied by email domain ownership"]
+            "evidence": ["inferred from business type"]
           }
         },
         "location_presence": {
@@ -415,6 +435,24 @@ Extract any of the following categories if present:
       },
       "note": "New person mentioned, may be worth creating identity node"
     }
+  ],
+  "unattributed_facts": [
+    {
+      "fact_type": "phone",
+      "fact_value": "+15551234567",
+      "shared_by": "Dad",
+      "context": "Sent as standalone message with no explanation",
+      "possible_attributions": ["Dad's alternate number", "Third party contact", "Business number"],
+      "note": "Cannot determine whose phone number this is without more context"
+    },
+    {
+      "fact_type": "email",
+      "fact_value": "support@somecompany.com",
+      "shared_by": "Dad",
+      "context": "Contact them at support@somecompany.com",
+      "possible_attributions": ["Business contact", "Company support"],
+      "note": "Shared email but not attributed to a specific person"
+    }
   ]
 }
 ```
@@ -429,8 +467,10 @@ Extract any of the following categories if present:
 4. **Flag sensitive data** - Mark SSN, financial, medical info as sensitive
 5. **Note self-disclosure** - Mark when someone explicitly shares their own info vs being mentioned
 6. **Create new identity candidates** - If a third party is mentioned with enough detail, flag them
-7. **Confidence levels**:
+7. **Use unattributed_facts** - If an identifier (phone, email) is shared without clear ownership, put it in unattributed_facts with context about who shared it and possible attributions
+8. **Owner vs Employer** - Distinguish between working FOR a company (employer_current) vs OWNING a business (business_owned). Someone who owns a restaurant is NOT employed BY it.
+9. **Confidence levels**:
    - **high**: Explicitly stated or very clear
    - **medium**: Strongly implied or partially stated
    - **low**: Inferred or uncertain
-8. **Don't hallucinate** - Only extract what's actually in the messages
+10. **Don't hallucinate** - Only extract what's actually in the messages

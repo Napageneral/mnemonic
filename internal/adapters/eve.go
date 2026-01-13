@@ -134,6 +134,19 @@ func (e *EveAdapter) Sync(ctx context.Context, commsDB *sql.DB, full bool) (Sync
 	}
 	result.Perf["contacts.total"] = time.Since(contactsStart).String()
 
+	// Sync chats/threads (to establish thread metadata)
+	chatsStart := time.Now()
+	threadsCreated, threadsUpdated, perfChats, err := e.syncChats(ctx, eveDB, commsDB)
+	if err != nil {
+		return result, fmt.Errorf("failed to sync chats: %w", err)
+	}
+	result.ThreadsCreated = threadsCreated
+	result.ThreadsUpdated = threadsUpdated
+	for k, v := range perfChats {
+		result.Perf["chats."+k] = v
+	}
+	result.Perf["chats.total"] = time.Since(chatsStart).String()
+
 	// Sync messages
 	messagesStart := time.Now()
 	eventsCreated, eventsUpdated, maxImportedTimestamp, perfMessages, err := e.syncMessages(ctx, eveDB, commsDB, lastSyncTimestamp, contactMap, mePersonID)
@@ -511,6 +524,113 @@ func (e *EveAdapter) syncWhoami(ctx context.Context, eveDB, commsDB *sql.DB) (pe
 	}
 
 	return personsCreated, mePersonID, nil
+}
+
+// syncChats syncs Eve chats to comms threads
+func (e *EveAdapter) syncChats(ctx context.Context, eveDB, commsDB *sql.DB) (threadsCreated int, threadsUpdated int, perf map[string]string, err error) {
+	_ = ctx
+	perf = map[string]string{}
+
+	// Query chats from Eve
+	qStart := time.Now()
+	rows, err := eveDB.Query(`
+		SELECT
+			c.id,
+			c.chat_identifier,
+			c.chat_name,
+			c.service_name
+		FROM chats c
+		ORDER BY c.id
+	`)
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("failed to query Eve chats: %w", err)
+	}
+	defer rows.Close()
+	perf["query"] = time.Since(qStart).String()
+
+	// Bulk write in a single transaction for SQLite performance
+	txStart := time.Now()
+	tx, err := commsDB.Begin()
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("begin comms tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmtInsertThread, err := tx.Prepare(`
+		INSERT INTO threads (id, channel, name, source_adapter, source_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_adapter, source_id) DO UPDATE SET
+			name = excluded.name,
+			updated_at = excluded.updated_at
+	`)
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("prepare insert thread: %w", err)
+	}
+	defer stmtInsertThread.Close()
+
+	for rows.Next() {
+		var chatID int64
+		var chatIdentifier string
+		var chatName, serviceName sql.NullString
+
+		if err := rows.Scan(&chatID, &chatIdentifier, &chatName, &serviceName); err != nil {
+			return threadsCreated, threadsUpdated, perf, fmt.Errorf("failed to scan chat row: %w", err)
+		}
+
+		// Determine thread name: prefer chat_name, fall back to chat_identifier
+		threadName := chatIdentifier
+		if chatName.Valid && chatName.String != "" {
+			threadName = chatName.String
+		}
+
+		// Generate deterministic thread ID from chat_identifier
+		threadID := e.Name() + ":" + chatIdentifier
+
+		now := time.Now().Unix()
+
+		// Try to insert, or update if exists
+		res, err := stmtInsertThread.Exec(
+			threadID,
+			"imessage",
+			threadName,
+			e.Name(),
+			chatIdentifier,
+			now,
+			now,
+		)
+		if err != nil {
+			return threadsCreated, threadsUpdated, perf, fmt.Errorf("upsert thread: %w", err)
+		}
+
+		// Check if this was an insert or update
+		// SQLite returns rows affected = 1 for both INSERT and UPDATE with ON CONFLICT
+		// We need to check if the thread existed before to distinguish
+		var exists int
+		err = tx.QueryRow("SELECT 1 FROM threads WHERE source_adapter = ? AND source_id = ? AND updated_at < ?",
+			e.Name(), chatIdentifier, now).Scan(&exists)
+		if err == sql.ErrNoRows {
+			// Thread was just created
+			threadsCreated++
+		} else if err == nil {
+			// Thread existed and was updated
+			threadsUpdated++
+		}
+		// Ignore other errors, just count based on RowsAffected
+		if err != nil && err != sql.ErrNoRows {
+			if n, _ := res.RowsAffected(); n > 0 {
+				threadsCreated++
+			}
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return threadsCreated, threadsUpdated, perf, err
+	}
+	if err := tx.Commit(); err != nil {
+		return threadsCreated, threadsUpdated, perf, fmt.Errorf("commit comms tx: %w", err)
+	}
+	perf["tx_commit"] = time.Since(txStart).String()
+	return threadsCreated, threadsUpdated, perf, nil
 }
 
 // syncMessages syncs Eve messages to comms events
