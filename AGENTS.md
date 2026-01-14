@@ -302,11 +302,14 @@ comms chunk run imessage_3hr --json
 - FindFactCollisions implements O(F) collision detection via GROUP BY fact_value HAVING COUNT > 1
 - Facts have three boolean flags: is_sensitive, is_identifier, is_hard_identifier
 - isIdentifierType returns true for both hard identifiers and soft identifiers (those with weights)
-- Analysis types seeded via INSERT OR IGNORE in schema.sql for idempotent registration
-- pii_extraction_v1 registered as structured analysis type with 27 facet extraction rules
-- facets_config_json maps JSON paths ($.persons[*].pii.category.field.value) to fact types
-- Prompt templates use {conversation_text} placeholder for dynamic content injection
+- Analysis types registered via `comms compute seed` command (matches convo-all-v1 pattern)
+- Compute seed uses ON CONFLICT(name) DO NOTHING for idempotent registration
+- pii_extraction_v1 registered as structured analysis type with 19 facet extraction mappings
+- facets_config_json uses simpler "mappings" structure: [{"json_path": "...", "facet_type": "..."}]
+- Prompt templates embedded as Go strings in computeSeedCmd (easier than SQL escaping)
+- Prompt templates use {{{conversation_text}}} placeholder for dynamic content injection
 - gemini-2.0-flash model configured for cost-effective PII extraction
+- Analysis type prompt is comprehensive (6860 bytes) with full taxonomy, rules, and output format
 - Single quotes in SQL strings require escaping with double quotes ('')
 - Analysis framework enables LLM-based extraction without custom parsing code
 - Facet-to-fact sync: SyncFacetsToPersonFacts processes completed pii_extraction runs
