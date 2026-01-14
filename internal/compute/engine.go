@@ -61,6 +61,9 @@ type Config struct {
 	// RPM settings (0 = auto-probe)
 	AnalysisRPM int
 	EmbedRPM    int
+
+	// Disable adaptive concurrency controller (no in-flight throttling)
+	DisableAdaptive bool
 }
 
 // DefaultConfig returns sensible defaults optimized for high-throughput processing
@@ -79,6 +82,7 @@ func DefaultConfig() Config {
 		BatchSize:      25,
 		AnalysisRPM:    0, // 0 = auto-probe
 		EmbedRPM:       0, // 0 = auto-probe
+		DisableAdaptive: false,
 	}
 }
 
@@ -128,11 +132,11 @@ func NewEngine(db *sql.DB, geminiClient *gemini.Client, cfg Config) (*Engine, er
 		geminiClient.SetEmbedRPM(cfg.EmbedRPM)
 	}
 
-	// Create adaptive semaphore for in-flight control
-	e.sem = NewAdaptiveSemaphore(cfg.WorkerCount)
-
-	// Create adaptive controller
-	e.adaptiveCtrl = NewAdaptiveController(e.sem, DefaultAdaptiveControllerConfig(cfg.WorkerCount))
+	// Create adaptive semaphore/controller for in-flight control (optional)
+	if !cfg.DisableAdaptive {
+		e.sem = NewAdaptiveSemaphore(cfg.WorkerCount)
+		e.adaptiveCtrl = NewAdaptiveController(e.sem, DefaultAdaptiveControllerConfig(cfg.WorkerCount))
+	}
 
 	// Create auto-RPM controllers if not using fixed RPM
 	if cfg.AnalysisRPM <= 0 {
@@ -145,7 +149,7 @@ func NewEngine(db *sql.DB, geminiClient *gemini.Client, cfg Config) (*Engine, er
 	// Create embedding batcher for high-throughput batch API calls (100 embeddings per request)
 	e.embeddingBatcher = NewEmbeddingsBatcher(geminiClient, cfg.EmbeddingModel)
 
-	// Register wrapped handlers with adaptive control
+	// Register handlers (adaptive control optional)
 	e.engine.RegisterHandler(JobTypeAnalysis, e.wrapHandler(e.handleAnalysisJob, JobTypeAnalysis))
 	e.engine.RegisterHandler(JobTypeEmbedding, e.wrapHandler(e.handleEmbeddingJob, JobTypeEmbedding))
 
@@ -155,18 +159,22 @@ func NewEngine(db *sql.DB, geminiClient *gemini.Client, cfg Config) (*Engine, er
 // wrapHandler wraps a job handler with adaptive control (semaphore + observation)
 func (e *Engine) wrapHandler(base func(context.Context, *queue.Job) error, jobType string) func(context.Context, *queue.Job) error {
 	return func(ctx context.Context, job *queue.Job) error {
-		// Acquire semaphore (respects adaptive concurrency limit)
-		if err := e.sem.Acquire(ctx); err != nil {
-			return err
+		// Acquire semaphore if adaptive control is enabled
+		if e.sem != nil {
+			if err := e.sem.Acquire(ctx); err != nil {
+				return err
+			}
+			defer e.sem.Release()
 		}
-		defer e.sem.Release()
 
 		start := time.Now()
 		err := base(ctx, job)
 		elapsed := time.Since(start)
 
 		// Feed the adaptive controller
-		e.adaptiveCtrl.Observe(elapsed, err)
+		if e.adaptiveCtrl != nil {
+			e.adaptiveCtrl.Observe(elapsed, err)
+		}
 
 		// Feed the RPM controllers by job type
 		switch jobType {
@@ -212,7 +220,9 @@ func (e *Engine) Run(ctx context.Context) (*engine.Stats, error) {
 	e.cancelControllers = cancel
 
 	// Start the adaptive controller
-	e.adaptiveCtrl.Start(ctrlCtx)
+	if e.adaptiveCtrl != nil {
+		e.adaptiveCtrl.Start(ctrlCtx)
+	}
 
 	// Start RPM auto-controllers
 	if e.analysisRPMCtrl != nil {

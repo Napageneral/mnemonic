@@ -60,9 +60,9 @@ func DefaultAdaptiveControllerConfig(maxInFlight int) AdaptiveControllerConfig {
 		MinInFlight:       1,
 		MaxInFlight:       maxInFlight,
 		Tick:              1 * time.Second,
-		DecreaseFactor:    0.7,
-		IncreasePct:       0.05,
-		FailRateThreshold: 0.03,
+		DecreaseFactor:    0.85,
+		IncreasePct:       0.12,
+		FailRateThreshold: 0.08,
 	}
 }
 
@@ -229,8 +229,8 @@ func (c *AdaptiveController) step() {
 	if total > 0 && failRate >= c.cfg.FailRateThreshold {
 		congestion = true
 	}
-	// Latency inflation heuristic: if EWMA is >2.0x baseline, treat as congestion.
-	if c.ewmaBase > 0 && c.ewma > time.Duration(float64(c.ewmaBase)*2.0) {
+	// Latency inflation heuristic: if EWMA is >3.0x baseline, treat as congestion.
+	if c.ewmaBase > 0 && c.ewma > time.Duration(float64(c.ewmaBase)*3.0) {
 		congestion = true
 	}
 

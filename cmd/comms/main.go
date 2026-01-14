@@ -4754,6 +4754,7 @@ Examples:
 	var computeAnalysisModel string
 	var computeEmbeddingModel string
 	var computePreload bool
+	var computeDisableAdaptive bool
 
 	// compute run - run the compute engine
 	computeRunCmd := &cobra.Command{
@@ -4780,6 +4781,7 @@ Examples:
 			if computeEmbeddingModel != "" {
 				cfg.EmbeddingModel = computeEmbeddingModel
 			}
+			cfg.DisableAdaptive = computeDisableAdaptive
 
 			engine, err := compute.NewEngine(database, geminiClient, cfg)
 			if err != nil {
@@ -4793,7 +4795,11 @@ Examples:
 				fmt.Printf("TxBatchWriter enabled (batch size: %d)\n", cfg.BatchSize)
 			}
 			fmt.Printf("Analysis model: %s, Embedding model: %s\n", cfg.AnalysisModel, cfg.EmbeddingModel)
-			fmt.Println("Adaptive controllers: enabled (auto-RPM, adaptive concurrency)")
+			if cfg.DisableAdaptive {
+				fmt.Println("Adaptive controllers: disabled (fixed worker pool only)")
+			} else {
+				fmt.Println("Adaptive controllers: enabled (auto-RPM, adaptive concurrency)")
+			}
 
 			// Pre-encode conversations if requested (for maximum throughput)
 			if computePreload {
@@ -4888,6 +4894,7 @@ Examples:
 	computeRunCmd.Flags().StringVar(&computeAnalysisModel, "analysis-model", "", "Gemini model for analysis")
 	computeRunCmd.Flags().StringVar(&computeEmbeddingModel, "embedding-model", "", "Gemini model for embeddings")
 	computeRunCmd.Flags().BoolVar(&computePreload, "preload", false, "Pre-load all conversations into cache for max throughput")
+	computeRunCmd.Flags().BoolVar(&computeDisableAdaptive, "no-adaptive", false, "Disable adaptive concurrency controller")
 
 	// compute enqueue - queue jobs
 	computeEnqueueCmd := &cobra.Command{
