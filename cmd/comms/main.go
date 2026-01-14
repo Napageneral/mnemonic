@@ -4755,6 +4755,7 @@ Examples:
 	var computeEmbeddingModel string
 	var computePreload bool
 	var computeDisableAdaptive bool
+	var computeEmbedBatchSize int
 
 	// compute run - run the compute engine
 	computeRunCmd := &cobra.Command{
@@ -4780,6 +4781,9 @@ Examples:
 			}
 			if computeEmbeddingModel != "" {
 				cfg.EmbeddingModel = computeEmbeddingModel
+			}
+			if computeEmbedBatchSize > 0 {
+				cfg.EmbeddingBatchSize = computeEmbedBatchSize
 			}
 			cfg.DisableAdaptive = computeDisableAdaptive
 
@@ -4895,6 +4899,7 @@ Examples:
 	computeRunCmd.Flags().StringVar(&computeEmbeddingModel, "embedding-model", "", "Gemini model for embeddings")
 	computeRunCmd.Flags().BoolVar(&computePreload, "preload", false, "Pre-load all conversations into cache for max throughput")
 	computeRunCmd.Flags().BoolVar(&computeDisableAdaptive, "no-adaptive", false, "Disable adaptive concurrency controller")
+	computeRunCmd.Flags().IntVar(&computeEmbedBatchSize, "embed-batch-size", 100, "Embedding batch size (max 100)")
 
 	// compute enqueue - queue jobs
 	computeEnqueueCmd := &cobra.Command{

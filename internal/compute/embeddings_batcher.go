@@ -56,14 +56,17 @@ type BatcherMetrics struct {
 }
 
 // NewEmbeddingsBatcher creates a new embedding batcher
-func NewEmbeddingsBatcher(client *gemini.Client, model string) *EmbeddingsBatcher {
+func NewEmbeddingsBatcher(client *gemini.Client, model string, maxBatchSize int) *EmbeddingsBatcher {
+	if maxBatchSize <= 0 || maxBatchSize > defaultMaxBatchSize {
+		maxBatchSize = defaultMaxBatchSize
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &EmbeddingsBatcher{
 		client:        client,
 		model:         model,
-		maxBatchSize:  defaultMaxBatchSize,
+		maxBatchSize:  maxBatchSize,
 		flushInterval: defaultFlushInterval,
-		batch:         make([]EmbeddingTask, 0, defaultMaxBatchSize),
+		batch:         make([]EmbeddingTask, 0, maxBatchSize),
 		metrics:       &BatcherMetrics{},
 		ctx:           ctx,
 		cancel:        cancel,

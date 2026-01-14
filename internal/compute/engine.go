@@ -57,6 +57,7 @@ type Config struct {
 	EmbeddingModel string
 	UseBatchWriter bool // Enable TxBatchWriter for better write performance
 	BatchSize      int
+	EmbeddingBatchSize int
 
 	// RPM settings (0 = auto-probe)
 	AnalysisRPM int
@@ -80,6 +81,7 @@ func DefaultConfig() Config {
 		EmbeddingModel: "gemini-embedding-001",
 		UseBatchWriter: true, // Enable by default
 		BatchSize:      25,
+		EmbeddingBatchSize: 100,
 		AnalysisRPM:    0, // 0 = auto-probe
 		EmbedRPM:       0, // 0 = auto-probe
 		DisableAdaptive: false,
@@ -146,8 +148,8 @@ func NewEngine(db *sql.DB, geminiClient *gemini.Client, cfg Config) (*Engine, er
 		e.embedRPMCtrl = NewAutoRPMController(DefaultAutoRPMConfig(), geminiClient.SetEmbedRPM)
 	}
 
-	// Create embedding batcher for high-throughput batch API calls (100 embeddings per request)
-	e.embeddingBatcher = NewEmbeddingsBatcher(geminiClient, cfg.EmbeddingModel)
+	// Create embedding batcher for high-throughput batch API calls
+	e.embeddingBatcher = NewEmbeddingsBatcher(geminiClient, cfg.EmbeddingModel, cfg.EmbeddingBatchSize)
 
 	// Register handlers (adaptive control optional)
 	e.engine.RegisterHandler(JobTypeAnalysis, e.wrapHandler(e.handleAnalysisJob, JobTypeAnalysis))

@@ -51,16 +51,15 @@ func DefaultAutoRPMConfig() AutoRPMConfig {
 		MinRPM: 100,
 		// Tier-3 keys max out at 20k RPM
 		MaxRPM: 20000,
-		// Start higher for Tier-3 users - ramps to full speed in ~4 seconds
-		// Tier-1 users will hit 429s and back off automatically
-		StartRPM: 2000,
+		// Start at max; only back off if we see congestion.
+		// Tier-1 users will hit 429s and back off automatically.
+		StartRPM: 20000,
 
 		Tick: 1 * time.Second,
 
-		// Aggressive slow-start so Tier-3 keys get to 16k-20k RPM quickly, while still backing
-		// off fast on 429s/timeouts/net errors for Tier-1 users.
+		// Slow-start is effectively disabled since we start at MaxRPM.
 		SlowStartFactor:   2.0,
-		SlowStartUntilRPM: 16000,
+		SlowStartUntilRPM: 20000,
 
 		DecreaseFactor: 0.6,
 		IncreaseFactor: 1.25,
