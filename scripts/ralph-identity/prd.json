@@ -81,7 +81,7 @@
         "comms db query shows analysis_type registered"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Uses existing analysis framework from Eve migration"
     },
     {

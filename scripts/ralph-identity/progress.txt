@@ -131,3 +131,25 @@ Started: (pending Eve migration completion)
   - boolToInt helper converts Go bool to SQLite INTEGER (0 or 1)
 
 ---
+## 2026-01-13 - [US-034] Register pii_extraction_v1 as analysis_type
+- Added INSERT OR IGNORE statement to schema.sql to register pii_extraction_v1 analysis type
+- Configured as 'structured' output_type for facet extraction
+- Created facets_config_json with 27 extraction rules mapping JSON paths to fact types
+- Extraction paths cover all major PII categories: contact info, core identity, professional, location, relationships, education, digital identity, government IDs
+- Embedded full PII extraction prompt from prompts/pii-extraction-v1.prompt.md
+- Configured to use gemini-2.0-flash model for extraction
+- Prompt includes comprehensive instructions for attribution, confidence levels, and handling unattributed facts
+- Files changed: internal/db/schema.sql
+- **Learnings:**
+  - INSERT OR IGNORE pattern allows idempotent schema migrations without version incrementing
+  - Embedded SQL can contain complex JSON and multi-line strings with proper escaping
+  - facets_config_json structure: array of objects with facet_type, json_path, category, fact_type
+  - JSON path syntax $.persons[*].pii.category.field.value traverses nested extraction output
+  - Prompt template uses {conversation_text} placeholder for conversation injection
+  - Single quotes in SQL strings require escaping with double single quotes ('')
+  - Analysis types table integrates with existing analysis_runs and facets tables from Eve migration
+  - Model field allows different LLMs for different analysis types (gemini-2.0-flash for cost-effective PII extraction)
+  - JSON extraction rules enable automatic facet creation from structured LLM output without custom parsing code
+
+---
+
