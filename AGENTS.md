@@ -320,6 +320,12 @@ comms chunk run imessage_3hr --json
 - Evidence strings combined with semicolons when multiple evidence pieces exist
 - isSensitiveFactType flags SSN, passport, drivers_license as is_sensitive=1
 - SyncStats tracks: facets processed, facts created/updated, unattributed created, third parties created
+- Extraction CLI: comms extract pii enqueues PII extraction jobs via compute engine
+- Extraction filters: --channel, --since (30d/7d/2024-01-01), --conversation, --person, --dry-run, --limit
+- Extraction query excludes already-analyzed conversations via NOT EXISTS on analysis_runs
+- Duration parsing: --since supports days (30d), hours (7h), or YYYY-MM-DD date format
+- Third-party creation: ProcessPIIExtractionOutput creates persons with relationship_type='third_party'
+- Third-party facts: known_facts from extraction linked with source_type='mentioned', confidence=0.5
 
 ## Schema Quick Reference
 

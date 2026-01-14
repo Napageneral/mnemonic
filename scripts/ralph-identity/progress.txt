@@ -184,3 +184,82 @@ Started: (pending Eve migration completion)
   - Tests verify mapping consistency between facet types and fact types
   - SyncSingleRun allows processing individual analysis runs by ID
   - Stats tracking provides visibility: facets processed, facts created, unattributed created, third parties created
+
+---
+
+## 2026-01-13 - [US-036] Create extraction CLI command
+- Verified comms extract pii command fully implemented in cmd/comms/main.go
+- Command enqueues PII extraction jobs via compute engine
+- --channel flag filters conversations by channel (imessage, gmail, all)
+- --since flag supports multiple formats: 30d (days), 7d, 2024-01-01 (date)
+- --conversation flag processes single conversation by ID
+- --person flag finds conversations involving person (LIKE match on canonical_name/display_name)
+- --dry-run flag shows what would be processed without enqueueing jobs
+- --limit flag caps number of conversations to process
+- Query excludes conversations already analyzed (NOT EXISTS on analysis_runs)
+- Integrates with compute engine: EnqueueAnalysis creates analysis_runs
+- JSON output support via global --json flag
+- Additional commands: extract sync (facets → person_facts), extract status (show progress)
+- Files verified: cmd/comms/main.go (lines 4687-5039)
+- **Learnings:**
+  - Extract command has 3 subcommands: pii (enqueue), sync (process facets), status (show progress)
+  - Query builder pattern: start with base SQL, append WHERE clauses based on flags
+  - Time parsing supports duration format (30d, 7h) AND date format (2006-01-02)
+  - Person filter joins through conversation_events → event_participants → persons
+  - NOT EXISTS subquery prevents re-analyzing conversations (idempotent)
+  - Dry-run shows first 10 conversation IDs for preview
+  - Compute engine handles actual LLM calls and result storage
+  - EnqueueAnalysis creates pending analysis_runs, later processed by compute run
+  - Separation of concerns: extract pii = job creation, compute run = job execution
+  - Result struct pattern: OK bool, counts, Message for user feedback
+  - Cobra command flags: StringVar/BoolVar/IntVar for strongly-typed CLI args
+---
+
+## 2026-01-13 - [US-036] Create extraction CLI command
+- Verified comms extract pii command already fully implemented in cmd/comms/main.go (lines 4700-4885)
+- Command provides all required flags: --channel, --since, --conversation, --person, --dry-run, --limit
+- Filters conversations that haven't been analyzed yet (NOT EXISTS subquery on analysis_runs)
+- --channel flag filters by channel (imessage, gmail, etc.)
+- --since supports multiple formats: "30d", "7d", "2024-01-01" (days, hours, date)
+- --conversation processes specific conversation by ID
+- --person finds conversations involving specific person (fuzzy name match via LIKE)
+- --dry-run shows what would be processed without enqueueing jobs
+- Enqueues PII extraction jobs via compute.Engine.EnqueueAnalysis()
+- Requires GEMINI_API_KEY environment variable for LLM calls
+- Additional commands: comms extract sync (sync facets to person_facts), comms extract status (show extraction progress)
+- JSON output support via --json flag
+- Files: cmd/comms/main.go (lines 4687-5040)
+- **Learnings:**
+  - extract pii uses compute engine's EnqueueAnalysis to queue jobs asynchronously
+  - Jobs are processed by "comms compute run" command
+  - Query excludes already-processed conversations to prevent re-extraction
+  - Duration parsing: --since supports "30d" days, "7d" hours, or "2006-01-02" date format
+  - Person filtering joins: conversation_events → event_participants → persons
+  - Dry-run shows conversation IDs if <= 10 conversations for visibility
+  - extract sync calls identify.SyncFacetsToPersonFacts() to sync completed runs
+  - extract status shows breakdown by analysis run status (pending/running/completed/failed/blocked)
+  - Result structs provide structured JSON output with OK bool, counts, and message
+
+---
+
+## 2026-01-13 - [US-037] Implement third-party identity creation
+- Verified ProcessPIIExtractionOutput in internal/identify/sync.go handles third-party creation (lines 341-376)
+- Processes new_identity_candidates array from LLM extraction output
+- Creates new person records with relationship_type='third_party'
+- Generates new UUID for each third-party person
+- Uses candidate.Reference as canonical_name, or given_name from known_facts if available
+- Links known_facts to new person as person_facts with category=core_identity
+- Sets source_type='mentioned' for third-party facts (not self-disclosed)
+- Tracks creation with stats.ThirdPartiesCreated counter
+- Works seamlessly with facet-based sync (both paths handle third parties)
+- Files: internal/identify/sync.go (lines 341-376)
+- **Learnings:**
+  - Third-party creation integrated into sync pipeline, not separate command
+  - new_identity_candidates structure: {reference, known_facts map, note}
+  - Known facts are minimal: typically just given_name and relationship_to_primary
+  - Confidence set to 0.5 for third-party facts (medium confidence)
+  - Third parties can later be merged with existing persons via resolution
+  - Type assertion pattern: factValue.(string) to extract string from interface{}
+  - Error handling: silently skip if person creation fails (don't block sync)
+  - Stats tracking enables visibility into how many third parties are discovered
+

@@ -115,7 +115,7 @@
         "go build succeeds"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Entry point for running PII extraction"
     },
     {
@@ -129,7 +129,7 @@
         "go build succeeds"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Third parties mentioned in messages become identity nodes"
     },
     {
