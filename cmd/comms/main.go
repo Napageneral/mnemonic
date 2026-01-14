@@ -5625,7 +5625,7 @@ Examples:
 			}
 
 			ctx := context.Background()
-			count, err := engine.EnqueueAnalysis(ctx, "pii_extraction")
+			count, err := engine.EnqueueAnalysis(ctx, "pii_extraction", convIDs...)
 			if err != nil {
 				result := Result{OK: false, Message: fmt.Sprintf("Failed to enqueue analysis: %v", err)}
 				if jsonOutput {

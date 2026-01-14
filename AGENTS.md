@@ -339,6 +339,8 @@ comms chunk run imessage_3hr --json
 - GenerateMergeSuggestions creates merge_events: hard ID >= 0.8 auto-eligible, compound >= 0.85 auto-eligible, soft >= 0.6 manual review
 - ExecuteMerge validates conflicting facts (birthdate, SSN, passport, DL) before merge, downgrades conflicts to manual review
 - Merge execution moves facts, identities, event_participants from source to target in transaction
+- pairKey pattern (p1 < p2) ensures consistent person pair representation across algorithm phases
+- Bidirectional deduplication: check (p1,p2) OR (p2,p1) before creating merge_events
 - RunFullResolution orchestrates GenerateMergeSuggestions + optional ExecuteAutoMerges if --auto flag set
 - Resolution CLI: `comms identify resolve` with --auto (execute), --dry-run (preview), outputs phase counts
 - Merge management: accept <id>, reject <id>, accept-all (auto-eligible only), merges (list with --status, --auto-eligible, --limit)
@@ -346,14 +348,6 @@ comms chunk run imessage_3hr --json
 - Unattributed commands: list (--unresolved), attribute <fact_id> <person> (manual resolution)
 - Status command: `comms identify status` shows active/merged persons, facts, pending merges, cross-channel linked count
 - All identity commands support --json flag for programmatic access
-- ExecuteMerge performs transaction: move facts/identities/participants, detect conflicts, mark source as merged
-- Conflict detection checks: birthdate, SSN, passport, drivers_license - downgrades to manual review if mismatch
-- pairKey pattern (p1 < p2) ensures consistent person pair representation across algorithm phases
-- Bidirectional deduplication: check (p1,p2) OR (p2,p1) before creating merge_events
-- Resolution CLI: comms identify resolve (--auto-merge, --dry-run), merges, accept, reject, status
-- Person facts CLI: comms person facts <id> (--include-evidence, --category)
-- Unattributed facts CLI: comms identify unattributed (--unresolved), attribute <fact_id> --person <id>
-- Resolution stats: active/merged persons, total facts, hard identifiers, pending/auto-eligible merges, cross-channel linked
 - Auto-merge flow: detection → suggestion → automatic execution for confidence >= 0.8
 - Manual review flow: detection → suggestion → human approval → execution
 

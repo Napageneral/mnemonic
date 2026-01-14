@@ -121,7 +121,7 @@ func (e *Engine) QueueStats() (*queue.Stats, error) {
 }
 
 // EnqueueAnalysis queues analysis jobs for all un-analyzed conversations
-func (e *Engine) EnqueueAnalysis(ctx context.Context, analysisTypeName string) (int, error) {
+func (e *Engine) EnqueueAnalysis(ctx context.Context, analysisTypeName string, conversationIDs ...string) (int, error) {
 	// Get the analysis type
 	var analysisTypeID string
 	err := e.db.QueryRowContext(ctx, `
@@ -131,34 +131,40 @@ func (e *Engine) EnqueueAnalysis(ctx context.Context, analysisTypeName string) (
 		return 0, fmt.Errorf("analysis type not found: %w", err)
 	}
 
-	// Find conversations without analysis runs for this type
-	// Collect all IDs first, then close rows before enqueueing (SQLite deadlock avoidance)
-	rows, err := e.db.QueryContext(ctx, `
-		SELECT c.id FROM conversations c
-		WHERE NOT EXISTS (
-			SELECT 1 FROM analysis_runs ar
-			WHERE ar.conversation_id = c.id
-			AND ar.analysis_type_id = ?
-		)
-	`, analysisTypeID)
-	if err != nil {
-		return 0, fmt.Errorf("query conversations: %w", err)
-	}
-
 	var convIDs []string
-	for rows.Next() {
-		var convID string
-		if err := rows.Scan(&convID); err != nil {
+
+	// If specific conversation IDs provided, use those (already filtered by caller)
+	if len(conversationIDs) > 0 {
+		convIDs = conversationIDs
+	} else {
+		// Find conversations without analysis runs for this type
+		// Collect all IDs first, then close rows before enqueueing (SQLite deadlock avoidance)
+		rows, err := e.db.QueryContext(ctx, `
+			SELECT c.id FROM conversations c
+			WHERE NOT EXISTS (
+				SELECT 1 FROM analysis_runs ar
+				WHERE ar.conversation_id = c.id
+				AND ar.analysis_type_id = ?
+			)
+		`, analysisTypeID)
+		if err != nil {
+			return 0, fmt.Errorf("query conversations: %w", err)
+		}
+
+		for rows.Next() {
+			var convID string
+			if err := rows.Scan(&convID); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			convIDs = append(convIDs, convID)
+		}
+		if err := rows.Err(); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		convIDs = append(convIDs, convID)
-	}
-	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, err
 	}
-	rows.Close()
 
 	// Now enqueue (rows is closed, no deadlock)
 	count := 0
