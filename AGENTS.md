@@ -294,6 +294,14 @@ comms chunk run imessage_3hr --json
 - Each conversation transaction inserts conversation record and all conversation_events mappings atomically
 - Thread-based chunking requires events to have thread_id set - filters WHERE thread_id IS NOT NULL
 - GetChunkerForDefinition uses strategy field to instantiate correct chunker type (time_gap, thread, etc.)
+- Person facts use category/fact_type/fact_value structure for flexible PII storage
+- Fact constants defined in internal/identify/facts.go: FactTypeEmailPersonal, FactTypePhoneMobile, etc.
+- HardIdentifiers slice lists all fact types that trigger immediate merge consideration
+- SoftIdentifierWeights map defines weight for each soft identifier (0.15-0.25 range)
+- InsertFact uses ON CONFLICT to handle duplicates - updates confidence if higher
+- FindFactCollisions implements O(F) collision detection via GROUP BY fact_value HAVING COUNT > 1
+- Facts have three boolean flags: is_sensitive, is_identifier, is_hard_identifier
+- isIdentifierType returns true for both hard identifiers and soft identifiers (those with weights)
 
 ## Schema Quick Reference
 
