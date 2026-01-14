@@ -65,7 +65,7 @@
         "Basic unit tests pass"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Foundation for fact storage and retrieval"
     },
     {

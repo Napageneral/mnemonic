@@ -105,3 +105,29 @@ Started: (pending Eve migration completion)
   - Composite index on (source, target) prevents duplicate suggestions
 
 ---
+
+## 2026-01-13 - [US-033] Create fact management utilities
+- Created internal/identify/facts.go with comprehensive fact management
+- Implemented PersonFact struct matching person_facts schema
+- Defined 17 hard identifier constants (email, phone, social handles, government IDs)
+- Defined 6 soft identifier constants with weights (employer 0.20, location 0.15, profession 0.15, spouse 0.25, school 0.15, birthdate 0.25)
+- Implemented InsertFact with ON CONFLICT upsert pattern
+- Implemented GetFactsForPerson, GetHardIdentifiers, GetFactsByType, GetFactsByCategory
+- Implemented FindFactCollisions with O(F) algorithm using GROUP BY fact_value
+- Implemented FindAllHardIdentifierCollisions for resolution pipeline
+- Created comprehensive unit tests in facts_test.go
+- Files changed: internal/identify/facts.go (new), internal/identify/facts_test.go (new), AGENTS.md
+- **Learnings:**
+  - ON CONFLICT DO UPDATE with MAX(confidence, excluded.confidence) keeps highest confidence on duplicate
+  - SQLite GROUP_CONCAT uses comma separator by default for person ID lists
+  - isIdentifierType checks both HardIdentifiers list and SoftIdentifierWeights map
+  - Automatic flag setting (is_identifier, is_hard_identifier) based on fact type prevents manual errors
+  - Fact collision detection via GROUP BY is O(F) not O(P²) - scales to millions of facts
+  - Evidence field stores original message quote for audit trail
+  - Three-tier identifier taxonomy: hard (1 match = merge), compound (multi-field), soft (weighted scoring)
+  - PersonFact struct uses pointers for optional fields (SourceChannel, Evidence, etc.)
+  - splitPersonIDs helper manually parses comma-separated string (no strings.Split to avoid imports)
+  - Tests verify constants, helpers, and type detection logic without requiring database
+  - boolToInt helper converts Go bool to SQLite INTEGER (0 or 1)
+
+---
