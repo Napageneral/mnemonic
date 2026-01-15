@@ -500,6 +500,30 @@ comms identify attribute <fact_id> --person <person_id>
 - [ ] Run extraction on Gmail threads
 - [ ] Cross-channel resolution sweep
 
+### Phase 6: PII Post-Processing Pipeline (Accuracy + Scale)
+- [ ] Store raw extraction output in staging (raw JSON + minimal metadata)
+- [ ] Enforce a strict key allowlist (reject unknown keys, log for review)
+- [ ] Add alias mapping for common drift keys (attractors)
+- [ ] Canonicalize fact values prior to insertion
+- [ ] Deduplicate facts using normalized values (before resolution)
+- [ ] Split Tier 1 identifiers vs Tier 2 enrichment
+- [ ] Only Tier 1 enters collision detection and matching
+- [ ] Gate third-party creation: require >=1 identifier-grade fact
+- [ ] Keep third-party mentions in staging if identifier-grade is missing
+- [ ] Add prompt guardrails: ignore speaker labels for full_legal_name
+
+### Phase 7: Ontology from Corpus (Iterative)
+- [ ] Export all observed keys + counts from extracted corpus
+- [ ] Embed keys + sample values and cluster to propose canonical ontology
+- [ ] Pick canonical keys and update prompt schema + key map
+- [ ] Repeat with larger samples until ontology stabilizes
+- [ ] Add runtime telemetry for new/unrecognized keys
+
+### Phase 8: Conversation Chunking Experiments
+- [ ] Compare 50-100 message chunks vs 500 vs monthly/quarterly
+- [ ] Track identifier recall, third-party rate, collision group size
+- [ ] Manually spot-check precision on each chunk size
+
 ---
 
 ## Cost Analysis
@@ -516,6 +540,26 @@ Incremental: Only new conversations, ~$0.50-1/week for active user.
 ---
 
 ## Quality Metrics
+
+### Baseline Snapshot (2026-01-14, current dataset)
+- Total facts: 24,336
+- Identifier-grade facts: 2,238 (hard: 678, soft: 1,560)
+- Enrichment facts: 22,098
+- Distinct fact types: 1,175
+- Conversations with facts: 2,443
+- Avg facts per conversation: 9.96 (max: 45)
+- Name collision groups (count, max size):
+  - full_legal_name: 20 groups (max 11)
+  - full_name: 24 groups (max 39)
+  - given_name: 159 groups (max 174)
+  - family_name: 28 groups (max 55)
+- Handle/email collision groups (count, max size):
+  - email_personal: 2 groups (max 4)
+  - phone_mobile: 11 groups (max 5)
+  - social_twitter: 11 groups (max 2)
+  - social_instagram: 4 groups (max 2)
+  - social_linkedin: 1 group (max 2)
+- Top drift keys (not in prompt schema): relationship_to_primary, evidence, context, full_name, relationship_to_user, nickname, relationship_to_group, relationship, role, dietary_preferences, location, digital_identity
 
 ```sql
 -- Resolution completeness

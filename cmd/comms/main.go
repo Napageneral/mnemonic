@@ -2509,6 +2509,7 @@ queryable event store with identity resolution.`,
 	// identify resolve - run full identity resolution
 	var resolveAutoMerge bool
 	var resolveDryRun bool
+	var resolveSkipSoft bool
 	identifyResolveCmd := &cobra.Command{
 		Use:   "resolve",
 		Short: "Run identity resolution to find and merge matching persons",
@@ -2542,11 +2543,12 @@ The algorithm runs in three phases:
 			}
 			defer database.Close()
 
+			includeSoft := !resolveSkipSoft
+
 			if resolveDryRun {
 				// Just show what would happen
 				hardCollisions, _ := identify.DetectHardIDCollisions(database)
 				compoundMatches, _ := identify.DetectCompoundMatches(database)
-				softScores, _ := identify.ScoreSoftIdentifiers(database)
 
 				result := Result{
 					OK:              true,
@@ -2554,9 +2556,12 @@ The algorithm runs in three phases:
 					CompoundMatches: len(compoundMatches),
 					Message:         "Dry run - no changes made",
 				}
-				for _, s := range softScores {
-					if s.Score >= 0.6 {
-						result.SoftAccumulations++
+				if includeSoft {
+					softScores, _ := identify.ScoreSoftIdentifiers(database)
+					for _, s := range softScores {
+						if s.Score >= 0.6 {
+							result.SoftAccumulations++
+						}
 					}
 				}
 
@@ -2571,7 +2576,7 @@ The algorithm runs in three phases:
 				return
 			}
 
-			res, err := identify.RunFullResolution(database, resolveAutoMerge)
+			res, err := identify.RunFullResolution(database, resolveAutoMerge, includeSoft)
 			if err != nil {
 				result := Result{OK: false, Message: fmt.Sprintf("Failed to run resolution: %v", err)}
 				if jsonOutput {
@@ -2609,6 +2614,7 @@ The algorithm runs in three phases:
 	}
 	identifyResolveCmd.Flags().BoolVar(&resolveAutoMerge, "auto", false, "Automatically execute high-confidence merges")
 	identifyResolveCmd.Flags().BoolVar(&resolveDryRun, "dry-run", false, "Show what would be detected without making changes")
+	identifyResolveCmd.Flags().BoolVar(&resolveSkipSoft, "skip-soft", false, "Skip soft identifier accumulation (faster)")
 
 	// identify merges - list pending merge events
 	var mergesStatus string

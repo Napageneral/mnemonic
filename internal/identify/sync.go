@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -124,6 +125,18 @@ func syncAnalysisRun(db *sql.DB, runID, conversationID string) (*SyncStats, erro
 		return nil, fmt.Errorf("get conversation channel: %w", err)
 	}
 
+	// Prefer parsing full JSON output for attribution-aware facts.
+	var outputText sql.NullString
+	if err := db.QueryRow(`SELECT output_text FROM analysis_runs WHERE id = ?`, runID).Scan(&outputText); err == nil {
+		if outputText.Valid && outputText.String != "" {
+			runStats, err := ProcessPIIExtractionOutput(db, runID, conversationID, outputText.String)
+			if err == nil {
+				// Use JSON output path only to avoid duplicate unattributed facts.
+				return runStats, nil
+			}
+		}
+	}
+
 	// Get all facets for this analysis run
 	rows, err := db.Query(`
 		SELECT id, facet_type, value, person_id, confidence, metadata_json
@@ -133,20 +146,40 @@ func syncAnalysisRun(db *sql.DB, runID, conversationID string) (*SyncStats, erro
 	if err != nil {
 		return nil, fmt.Errorf("query facets: %w", err)
 	}
-	defer rows.Close()
 
-	now := time.Now().Unix()
+	type facetRow struct {
+		FacetID      string
+		FacetType    string
+		Value        string
+		PersonID     sql.NullString
+		Confidence   sql.NullFloat64
+		MetadataJSON sql.NullString
+	}
 
+	var facets []facetRow
 	for rows.Next() {
-		var facetID, facetType, value string
-		var personID sql.NullString
-		var confidence sql.NullFloat64
-		var metadataJSON sql.NullString
-
-		if err := rows.Scan(&facetID, &facetType, &value, &personID, &confidence, &metadataJSON); err != nil {
+		var f facetRow
+		if err := rows.Scan(&f.FacetID, &f.FacetType, &f.Value, &f.PersonID, &f.Confidence, &f.MetadataJSON); err != nil {
 			stats.Errors++
 			continue
 		}
+		facets = append(facets, f)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now().Unix()
+
+	for _, f := range facets {
+		facetID := f.FacetID
+		facetType := f.FacetType
+		value := f.Value
+		personID := f.PersonID
+		confidence := f.Confidence
+		metadataJSON := f.MetadataJSON
+
 		stats.FacetsProcessed++
 
 		// Skip empty values
@@ -249,7 +282,7 @@ func isSensitiveFactType(factType string) bool {
 func ProcessPIIExtractionOutput(db *sql.DB, runID, conversationID, outputJSON string) (*SyncStats, error) {
 	stats := &SyncStats{}
 
-	var output struct {
+	type outputShape struct {
 		ExtractionMetadata struct {
 			Channel                  string `json:"channel"`
 			PrimaryContactName       string `json:"primary_contact_name"`
@@ -274,139 +307,268 @@ func ProcessPIIExtractionOutput(db *sql.DB, runID, conversationID, outputJSON st
 		} `json:"unattributed_facts"`
 	}
 
-	if err := json.Unmarshal([]byte(outputJSON), &output); err != nil {
-		return nil, fmt.Errorf("parse output JSON: %w", err)
+	var outputs []outputShape
+	if err := json.Unmarshal([]byte(outputJSON), &outputs); err != nil {
+		var single outputShape
+		if err := json.Unmarshal([]byte(outputJSON), &single); err != nil {
+			return nil, fmt.Errorf("parse output JSON: %w", err)
+		}
+		outputs = []outputShape{single}
 	}
 
 	now := time.Now().Unix()
-	channel := output.ExtractionMetadata.Channel
+	participants, _ := loadConversationParticipants(db, conversationID)
+	meID, _ := getMePersonID(db)
 
-	// Process each person's PII
-	for _, person := range output.Persons {
-		// Find the person_id for this person
-		// For primary contact, look up by the identifier
-		// For others, we may need to match by reference/name
-		var personID string
-		if person.IsPrimaryContact {
-			// Look up primary contact by identifier
+	for _, output := range outputs {
+		channel := output.ExtractionMetadata.Channel
+		if channel == "" {
+			channel = getConversationChannel(db, conversationID)
+		}
+
+		primaryRef := ""
+		for _, p := range output.Persons {
+			if p.IsPrimaryContact {
+				primaryRef = p.Reference
+				break
+			}
+		}
+
+		primaryPersonID := ""
+		if output.ExtractionMetadata.PrimaryContactIdentifier != "" {
 			err := db.QueryRow(`
 				SELECT p.id FROM persons p
 				JOIN identities i ON p.id = i.person_id
 				WHERE i.identifier = ?
 				LIMIT 1
-			`, output.ExtractionMetadata.PrimaryContactIdentifier).Scan(&personID)
+			`, output.ExtractionMetadata.PrimaryContactIdentifier).Scan(&primaryPersonID)
 			if err != nil {
-				continue // Can't find person
+				primaryPersonID = ""
 			}
-		} else {
-			// For non-primary contacts, try to find by canonical_name
-			err := db.QueryRow(`
-				SELECT id FROM persons 
-				WHERE canonical_name LIKE ? OR display_name LIKE ?
-				LIMIT 1
-			`, "%"+person.Reference+"%", "%"+person.Reference+"%").Scan(&personID)
-			if err != nil {
-				// This might be a new third party - skip for now
-				continue
+		}
+		if primaryPersonID == "" {
+			if matchID, ok := matchParticipantByName(participants, primaryRef); ok {
+				primaryPersonID = matchID
+			} else if id := singleNonMeParticipant(participants); id != "" {
+				primaryPersonID = id
 			}
 		}
 
-		// Process all PII categories
-		for category, facts := range person.PII {
-			for factKey, factData := range facts {
-				factMap, ok := factData.(map[string]interface{})
-				if !ok {
+		// Process each person's PII
+		for _, person := range output.Persons {
+			var personID string
+			if person.IsPrimaryContact {
+				personID = primaryPersonID
+			}
+
+			if personID == "" && meID != "" && refMatchesPerson(person.Reference, meID, participants) {
+				personID = meID
+			}
+			if personID == "" {
+				if matchID, ok := matchParticipantByName(participants, person.Reference); ok {
+					personID = matchID
+				}
+			}
+			if personID == "" {
+				err := db.QueryRow(`
+					SELECT id FROM persons 
+					WHERE canonical_name LIKE ? OR display_name LIKE ?
+					LIMIT 1
+				`, "%"+person.Reference+"%", "%"+person.Reference+"%").Scan(&personID)
+				if err != nil {
 					continue
 				}
+			}
 
-				value, _ := factMap["value"].(string)
-				if value == "" {
-					// Handle array values
-					if arr, ok := factMap["value"].([]interface{}); ok && len(arr) > 0 {
-						for _, v := range arr {
-							if s, ok := v.(string); ok {
-								processExtractedFact(db, stats, personID, category, factKey, s, factMap, conversationID, channel, runID, now)
+			// Process all PII categories
+			for category, facts := range person.PII {
+				for factKey, factData := range facts {
+					factMap, ok := factData.(map[string]interface{})
+					if !ok {
+						continue
+					}
+
+					value, _ := factMap["value"].(string)
+					if value == "" {
+						// Handle array values
+						if arr, ok := factMap["value"].([]interface{}); ok && len(arr) > 0 {
+							for _, v := range arr {
+								if s, ok := v.(string); ok {
+									processExtractedFact(db, stats, personID, category, factKey, s, factMap, conversationID, channel, runID, now)
+								}
 							}
 						}
 						continue
 					}
-					continue
-				}
 
-				processExtractedFact(db, stats, personID, category, factKey, value, factMap, conversationID, channel, runID, now)
-			}
-		}
-	}
-
-	// Process new identity candidates (third parties)
-	for _, candidate := range output.NewIdentityCandidates {
-		// Create a new person for this third party
-		personID := uuid.New().String()
-		name := candidate.Reference
-		if givenName, ok := candidate.KnownFacts["given_name"].(string); ok && givenName != "" {
-			name = givenName
-		}
-
-		_, err := db.Exec(`
-			INSERT INTO persons (id, canonical_name, relationship_type, created_at, updated_at)
-			VALUES (?, ?, 'third_party', ?, ?)
-		`, personID, name, now, now)
-		if err == nil {
-			stats.ThirdPartiesCreated++
-
-			// Add known facts for this new person
-			for factKey, factValue := range candidate.KnownFacts {
-				if strVal, ok := factValue.(string); ok && strVal != "" {
-					fact := PersonFact{
-						PersonID:           personID,
-						Category:           CategoryCoreIdentity,
-						FactType:           factKey,
-						FactValue:          strVal,
-						Confidence:         0.5,
-						SourceType:         "mentioned",
-						SourceConversation: &conversationID,
-					}
-					if channel != "" {
-						fact.SourceChannel = &channel
-					}
-					InsertFact(db, fact)
+					processExtractedFact(db, stats, personID, category, factKey, value, factMap, conversationID, channel, runID, now)
 				}
 			}
 		}
-	}
 
-	// Process unattributed facts
-	for _, uf := range output.UnattributedFacts {
-		if uf.FactValue == "" {
-			continue
+		// Process new identity candidates (third parties)
+		for _, candidate := range output.NewIdentityCandidates {
+			personID := uuid.New().String()
+			name := candidate.Reference
+			if givenName, ok := candidate.KnownFacts["given_name"].(string); ok && givenName != "" {
+				name = givenName
+			}
+
+			_, err := db.Exec(`
+				INSERT INTO persons (id, canonical_name, relationship_type, created_at, updated_at)
+				VALUES (?, ?, 'third_party', ?, ?)
+			`, personID, name, now, now)
+			if err == nil {
+				stats.ThirdPartiesCreated++
+
+				for factKey, factValue := range candidate.KnownFacts {
+					if strVal, ok := factValue.(string); ok && strVal != "" {
+						fact := PersonFact{
+							PersonID:           personID,
+							Category:           CategoryCoreIdentity,
+							FactType:           factKey,
+							FactValue:          strVal,
+							Confidence:         0.5,
+							SourceType:         "mentioned",
+							SourceConversation: &conversationID,
+						}
+						if channel != "" {
+							fact.SourceChannel = &channel
+						}
+						InsertFact(db, fact)
+					}
+				}
+			}
 		}
 
-		// Find the person_id of who shared this
-		var sharedByPersonID sql.NullString
-		if uf.SharedBy != "" {
-			db.QueryRow(`
-				SELECT id FROM persons 
-				WHERE canonical_name LIKE ? OR display_name LIKE ?
-				LIMIT 1
-			`, "%"+uf.SharedBy+"%", "%"+uf.SharedBy+"%").Scan(&sharedByPersonID)
-		}
+		// Process unattributed facts
+		for _, uf := range output.UnattributedFacts {
+			if uf.FactValue == "" {
+				continue
+			}
 
-		attributionsJSON, _ := json.Marshal(uf.PossibleAttributions)
+			var sharedByPersonID sql.NullString
+			if uf.SharedBy != "" {
+				db.QueryRow(`
+					SELECT id FROM persons 
+					WHERE canonical_name LIKE ? OR display_name LIKE ?
+					LIMIT 1
+				`, "%"+uf.SharedBy+"%", "%"+uf.SharedBy+"%").Scan(&sharedByPersonID)
+			}
 
-		_, err := db.Exec(`
-			INSERT INTO unattributed_facts (
-				id, fact_type, fact_value, shared_by_person_id,
-				source_conversation_id, context, possible_attributions, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT DO NOTHING
-		`, uuid.New().String(), uf.FactType, uf.FactValue, sharedByPersonID,
-			conversationID, uf.Context, string(attributionsJSON), now)
-		if err == nil {
-			stats.UnattributedCreated++
+			attributionsJSON, _ := json.Marshal(uf.PossibleAttributions)
+
+			_, err := db.Exec(`
+				INSERT INTO unattributed_facts (
+					id, fact_type, fact_value, shared_by_person_id,
+					source_conversation_id, context, possible_attributions, created_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT DO NOTHING
+			`, uuid.New().String(), uf.FactType, uf.FactValue, sharedByPersonID,
+				conversationID, uf.Context, string(attributionsJSON), now)
+			if err == nil {
+				stats.UnattributedCreated++
+			}
 		}
 	}
 
 	return stats, nil
+}
+
+type conversationParticipant struct {
+	ID            string
+	CanonicalName string
+	DisplayName   string
+	IsMe          bool
+}
+
+func loadConversationParticipants(db *sql.DB, conversationID string) ([]conversationParticipant, error) {
+	rows, err := db.Query(`
+		SELECT DISTINCT p.id, COALESCE(p.canonical_name, ''), COALESCE(p.display_name, ''), p.is_me
+		FROM persons p
+		JOIN event_participants ep ON p.id = ep.person_id
+		JOIN conversation_events ce ON ce.event_id = ep.event_id
+		WHERE ce.conversation_id = ?
+	`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []conversationParticipant
+	for rows.Next() {
+		var p conversationParticipant
+		var isMe int
+		if err := rows.Scan(&p.ID, &p.CanonicalName, &p.DisplayName, &isMe); err != nil {
+			return nil, err
+		}
+		p.IsMe = isMe == 1
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func getConversationChannel(db *sql.DB, conversationID string) string {
+	var channel sql.NullString
+	_ = db.QueryRow(`SELECT channel FROM conversations WHERE id = ?`, conversationID).Scan(&channel)
+	if channel.Valid {
+		return channel.String
+	}
+	return ""
+}
+
+func getMePersonID(db *sql.DB) (string, error) {
+	var id string
+	err := db.QueryRow(`SELECT id FROM persons WHERE is_me = 1 LIMIT 1`).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func matchParticipantByName(participants []conversationParticipant, reference string) (string, bool) {
+	ref := strings.ToLower(strings.TrimSpace(reference))
+	if ref == "" {
+		return "", false
+	}
+	for _, p := range participants {
+		if strings.Contains(strings.ToLower(p.CanonicalName), ref) ||
+			strings.Contains(strings.ToLower(p.DisplayName), ref) {
+			return p.ID, true
+		}
+	}
+	return "", false
+}
+
+func singleNonMeParticipant(participants []conversationParticipant) string {
+	var nonMe string
+	for _, p := range participants {
+		if p.IsMe {
+			continue
+		}
+		if nonMe != "" && nonMe != p.ID {
+			return ""
+		}
+		nonMe = p.ID
+	}
+	return nonMe
+}
+
+func refMatchesPerson(reference, personID string, participants []conversationParticipant) bool {
+	ref := strings.ToLower(strings.TrimSpace(reference))
+	if ref == "" {
+		return false
+	}
+	for _, p := range participants {
+		if p.ID != personID {
+			continue
+		}
+		if strings.Contains(strings.ToLower(p.CanonicalName), ref) ||
+			strings.Contains(strings.ToLower(p.DisplayName), ref) {
+			return true
+		}
+	}
+	return false
 }
 
 // processExtractedFact handles inserting a single extracted fact

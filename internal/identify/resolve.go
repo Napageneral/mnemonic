@@ -162,6 +162,10 @@ type SoftIdentifierScore struct {
 // ScoreSoftIdentifiers calculates similarity scores between persons
 // Uses weighted soft identifiers, iterates through facts O(F), not person pairs O(P²)
 func ScoreSoftIdentifiers(db *sql.DB) ([]SoftIdentifierScore, error) {
+	// Cap pair explosion for overly common values (e.g., "Austin", "Engineer").
+	// These are too ambiguous to be useful and can blow up runtime.
+	const maxSoftGroupSize = 50
+
 	// Map of (person1, person2) -> accumulated score and matching facts
 	type pairKey struct{ p1, p2 string }
 	scores := make(map[pairKey]*SoftIdentifierScore)
@@ -173,6 +177,9 @@ func ScoreSoftIdentifiers(db *sql.DB) ([]SoftIdentifierScore, error) {
 		}
 
 		for _, collision := range collisions {
+			if len(collision.PersonIDs) > maxSoftGroupSize {
+				continue
+			}
 			// For each collision, update scores for all person pairs
 			for i := 0; i < len(collision.PersonIDs); i++ {
 				for j := i + 1; j < len(collision.PersonIDs); j++ {
@@ -211,17 +218,42 @@ func ScoreSoftIdentifiers(db *sql.DB) ([]SoftIdentifierScore, error) {
 }
 
 // GenerateMergeSuggestions creates merge_events from collision detection results
-func GenerateMergeSuggestions(db *sql.DB) (*ResolutionResult, error) {
+func GenerateMergeSuggestions(db *sql.DB, includeSoft bool) (*ResolutionResult, error) {
 	result := &ResolutionResult{}
 	now := time.Now().Unix()
 
+	// Cache existing merge pairs to avoid per-pair DB lookups.
+	type pairKey struct{ p1, p2 string }
+	existing := make(map[pairKey]struct{})
+	rows, err := db.Query(`
+		SELECT source_person_id, target_person_id
+		FROM merge_events
+	`)
+	if err == nil {
+		for rows.Next() {
+			var p1, p2 string
+			if err := rows.Scan(&p1, &p2); err != nil {
+				continue
+			}
+			if p1 > p2 {
+				p1, p2 = p2, p1
+			}
+			existing[pairKey{p1, p2}] = struct{}{}
+		}
+		rows.Close()
+	}
+
 	// Phase 1: Hard identifier collisions
+	const maxHardGroupSize = 50
 	hardCollisions, err := DetectHardIDCollisions(db)
 	if err != nil {
 		return nil, fmt.Errorf("detect hard collisions: %w", err)
 	}
 
 	for _, collision := range hardCollisions {
+		if len(collision.PersonIDs) > maxHardGroupSize {
+			continue
+		}
 		result.HardCollisions++
 		for i := 0; i < len(collision.PersonIDs); i++ {
 			for j := i + 1; j < len(collision.PersonIDs); j++ {
@@ -230,14 +262,7 @@ func GenerateMergeSuggestions(db *sql.DB) (*ResolutionResult, error) {
 					p1, p2 = p2, p1
 				}
 
-				// Check if suggestion already exists
-				var exists int
-				db.QueryRow(`
-					SELECT COUNT(*) FROM merge_events 
-					WHERE (source_person_id = ? AND target_person_id = ?)
-					OR (source_person_id = ? AND target_person_id = ?)
-				`, p1, p2, p2, p1).Scan(&exists)
-				if exists > 0 {
+				if _, ok := existing[pairKey{p1, p2}]; ok {
 					continue
 				}
 
@@ -258,6 +283,7 @@ func GenerateMergeSuggestions(db *sql.DB) (*ResolutionResult, error) {
 					boolToInt(autoEligible), now)
 				if err == nil {
 					result.MergeSuggestionsCreated++
+					existing[pairKey{p1, p2}] = struct{}{}
 				}
 			}
 		}
@@ -276,14 +302,7 @@ func GenerateMergeSuggestions(db *sql.DB) (*ResolutionResult, error) {
 			p1, p2 = p2, p1
 		}
 
-		// Check if suggestion already exists
-		var exists int
-		db.QueryRow(`
-			SELECT COUNT(*) FROM merge_events 
-			WHERE (source_person_id = ? AND target_person_id = ?)
-			OR (source_person_id = ? AND target_person_id = ?)
-		`, p1, p2, p2, p1).Scan(&exists)
-		if exists > 0 {
+		if _, ok := existing[pairKey{p1, p2}]; ok {
 			continue
 		}
 
@@ -296,47 +315,44 @@ func GenerateMergeSuggestions(db *sql.DB) (*ResolutionResult, error) {
 		`, uuid.New().String(), p1, p2, string(factsJSON), match.Confidence, now)
 		if err == nil {
 			result.MergeSuggestionsCreated++
+			existing[pairKey{p1, p2}] = struct{}{}
 		}
 	}
 
 	// Phase 3: Soft identifier accumulation
-	softScores, err := ScoreSoftIdentifiers(db)
-	if err != nil {
-		return nil, fmt.Errorf("score soft identifiers: %w", err)
-	}
-
-	for _, score := range softScores {
-		if score.Score < 0.6 {
-			continue // Only create suggestions for score >= 0.6
-		}
-		result.SoftAccumulations++
-
-		p1, p2 := score.Person1ID, score.Person2ID
-		if p1 > p2 {
-			p1, p2 = p2, p1
+	if includeSoft {
+		softScores, err := ScoreSoftIdentifiers(db)
+		if err != nil {
+			return nil, fmt.Errorf("score soft identifiers: %w", err)
 		}
 
-		// Check if suggestion already exists
-		var exists int
-		db.QueryRow(`
-			SELECT COUNT(*) FROM merge_events 
-			WHERE (source_person_id = ? AND target_person_id = ?)
-			OR (source_person_id = ? AND target_person_id = ?)
-		`, p1, p2, p2, p1).Scan(&exists)
-		if exists > 0 {
-			continue
-		}
+		for _, score := range softScores {
+			if score.Score < 0.6 {
+				continue // Only create suggestions for score >= 0.6
+			}
+			result.SoftAccumulations++
 
-		factsJSON, _ := json.Marshal(score.MatchingFacts)
+			p1, p2 := score.Person1ID, score.Person2ID
+			if p1 > p2 {
+				p1, p2 = p2, p1
+			}
 
-		// Soft accumulation - generally not auto-eligible
-		_, err := db.Exec(`
-			INSERT INTO merge_events (id, source_person_id, target_person_id, merge_type,
-				triggering_facts, similarity_score, status, auto_eligible, created_at)
-			VALUES (?, ?, ?, 'soft_accumulation', ?, ?, 'pending', 0, ?)
-		`, uuid.New().String(), p1, p2, string(factsJSON), score.Score, now)
-		if err == nil {
-			result.MergeSuggestionsCreated++
+			if _, ok := existing[pairKey{p1, p2}]; ok {
+				continue
+			}
+
+			factsJSON, _ := json.Marshal(score.MatchingFacts)
+
+			// Soft accumulation - generally not auto-eligible
+			_, err := db.Exec(`
+				INSERT INTO merge_events (id, source_person_id, target_person_id, merge_type,
+					triggering_facts, similarity_score, status, auto_eligible, created_at)
+				VALUES (?, ?, ?, 'soft_accumulation', ?, ?, 'pending', 0, ?)
+			`, uuid.New().String(), p1, p2, string(factsJSON), score.Score, now)
+			if err == nil {
+				result.MergeSuggestionsCreated++
+				existing[pairKey{p1, p2}] = struct{}{}
+			}
 		}
 	}
 
@@ -495,9 +511,9 @@ func hasConflictingFacts(db *sql.DB, person1ID, person2ID string) (bool, error) 
 }
 
 // RunFullResolution runs the complete identity resolution pipeline
-func RunFullResolution(db *sql.DB, autoMerge bool) (*ResolutionResult, error) {
+func RunFullResolution(db *sql.DB, autoMerge bool, includeSoft bool) (*ResolutionResult, error) {
 	// Generate all merge suggestions
-	result, err := GenerateMergeSuggestions(db)
+	result, err := GenerateMergeSuggestions(db, includeSoft)
 	if err != nil {
 		return nil, err
 	}
