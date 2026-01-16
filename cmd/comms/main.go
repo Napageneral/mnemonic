@@ -6431,6 +6431,24 @@ func checkAdapterStatus(name string, adapter config.AdapterConfig) string {
 		}
 		return "missing source"
 
+	case "nexus":
+		eventsDir := ""
+		if v, ok := adapter.Options["events_dir"].(string); ok && v != "" {
+			eventsDir = v
+		} else if v, ok := adapter.Options["state_dir"].(string); ok && v != "" {
+			eventsDir = filepath.Join(v, "events")
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "error"
+			}
+			eventsDir = filepath.Join(home, "nexus", "state", "events")
+		}
+		if _, err := os.Stat(eventsDir); os.IsNotExist(err) {
+			return "missing nexus events dir"
+		}
+		return "ready"
+
 	case "bird":
 		// Check if bird CLI is available
 		if _, err := exec.LookPath("bird"); err != nil {

@@ -234,6 +234,29 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 			return result
 		}
 
+	case "nexus":
+		var opts adapters.NexusAdapterOptions
+		if v, ok := cfg.Options["events_dir"]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				opts.EventsDir = s
+			}
+		}
+		if v, ok := cfg.Options["state_dir"]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				opts.StateDir = s
+			}
+		}
+		if v, ok := cfg.Options["source"]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				opts.Source = s
+			}
+		}
+		adapter, err = adapters.NewNexusAdapter(opts)
+		if err != nil {
+			result.Error = fmt.Sprintf("Failed to create adapter: %v", err)
+			return result
+		}
+
 	case "bird":
 		// X/Twitter adapter via bird CLI
 		username := ""
