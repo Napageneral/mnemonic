@@ -165,11 +165,11 @@ func (c *TimeGapChunker) Chunk(ctx context.Context, db *sql.DB, definitionID str
 
 // conversation represents a chunked group of events
 type conversation struct {
-	events        []Event
-	startTime     int64
-	endTime       int64
-	threadID      string
-	channel       string
+	events    []Event
+	startTime int64
+	endTime   int64
+	threadID  string
+	channel   string
 }
 
 // splitByTimeGap splits events into conversations based on time gaps
@@ -389,8 +389,35 @@ func (c *ThreadChunker) Chunk(ctx context.Context, db *sql.DB, definitionID stri
 	}
 
 	// Create one conversation per thread
+	existingThreads := make(map[string]struct{})
+	existingRows, err := db.QueryContext(ctx, `
+		SELECT thread_id FROM conversations
+		WHERE definition_id = ? AND thread_id IS NOT NULL
+	`, definitionID)
+	if err != nil {
+		return result, fmt.Errorf("failed to query existing conversations: %w", err)
+	}
+	for existingRows.Next() {
+		var tid sql.NullString
+		if err := existingRows.Scan(&tid); err != nil {
+			existingRows.Close()
+			return result, fmt.Errorf("failed to scan existing conversation: %w", err)
+		}
+		if tid.Valid && tid.String != "" {
+			existingThreads[tid.String] = struct{}{}
+		}
+	}
+	if err := existingRows.Err(); err != nil {
+		existingRows.Close()
+		return result, fmt.Errorf("error iterating existing conversations: %w", err)
+	}
+	existingRows.Close()
+
 	for threadID, events := range eventsByThread {
 		if len(events) == 0 {
+			continue
+		}
+		if _, ok := existingThreads[threadID]; ok {
 			continue
 		}
 

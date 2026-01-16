@@ -52,11 +52,11 @@ type Engine struct {
 
 // Config for the compute engine
 type Config struct {
-	WorkerCount    int
-	AnalysisModel  string
-	EmbeddingModel string
-	UseBatchWriter bool // Enable TxBatchWriter for better write performance
-	BatchSize      int
+	WorkerCount        int
+	AnalysisModel      string
+	EmbeddingModel     string
+	UseBatchWriter     bool // Enable TxBatchWriter for better write performance
+	BatchSize          int
 	EmbeddingBatchSize int
 
 	// RPM settings (0 = auto-probe)
@@ -77,14 +77,14 @@ func DefaultConfig() Config {
 		// Comms defaults (per project policy):
 		// - Analysis: Gemini 3 Flash Preview
 		// - Embeddings: Gemini Embedding 001
-		AnalysisModel:  "gemini-3-flash-preview",
-		EmbeddingModel: "gemini-embedding-001",
-		UseBatchWriter: true, // Enable by default
-		BatchSize:      25,
+		AnalysisModel:      "gemini-3-flash-preview",
+		EmbeddingModel:     "gemini-embedding-001",
+		UseBatchWriter:     true, // Enable by default
+		BatchSize:          25,
 		EmbeddingBatchSize: 100,
-		AnalysisRPM:    0, // 0 = auto-probe
-		EmbedRPM:       0, // 0 = auto-probe
-		DisableAdaptive: false,
+		AnalysisRPM:        0, // 0 = auto-probe
+		EmbedRPM:           0, // 0 = auto-probe
+		DisableAdaptive:    false,
 	}
 }
 
@@ -684,7 +684,47 @@ func (e *Engine) handleAnalysisJob(ctx context.Context, job *queue.Job) error {
 		}
 	}
 
-	// Call Gemini
+	// Call Gemini (or local extractor for specific analysis types)
+	if analysisTypeName == "nexus_cli_invocations" || analysisTypeName == "terminal_invocations" {
+		tCustom := time.Now()
+		var outputText string
+		var err error
+		switch analysisTypeName {
+		case "nexus_cli_invocations":
+			outputText, err = e.buildNexusCLIOutput(ctx, payload.ConversationID)
+		case "terminal_invocations":
+			outputText, err = e.buildTerminalInvocationOutput(ctx, payload.ConversationID)
+		default:
+			err = fmt.Errorf("unsupported local analysis type: %s", analysisTypeName)
+		}
+		parseDur = time.Since(tCustom)
+		if err != nil {
+			e.db.ExecContext(ctx, `
+				UPDATE analysis_runs SET status = 'failed', error_message = ?, completed_at = ?
+				WHERE id = ?
+			`, err.Error(), time.Now().Unix(), runID)
+			return fmt.Errorf("build local output: %w", err)
+		}
+
+		tWrite := time.Now()
+		if facetsConfigJSON.Valid {
+			if err := e.extractAndPersistFacets(ctx, runID, payload.ConversationID, outputText, facetsConfigJSON.String); err != nil {
+				log.Printf("warning: facet extraction failed: %v", err)
+			}
+		}
+
+		_, err = e.db.ExecContext(ctx, `
+			UPDATE analysis_runs SET status = 'completed', output_text = ?, completed_at = ?
+			WHERE id = ?
+		`, outputText, time.Now().Unix(), runID)
+		dbWriteDur = time.Since(tWrite)
+
+		if err == nil {
+			outcome = "ok"
+		}
+		return err
+	}
+
 	req := &gemini.GenerateContentRequest{
 		Contents: []gemini.Content{{
 			Role:  "user",
@@ -1384,59 +1424,54 @@ func getResponseSchema(analysisTypeName string) any {
 				"extraction_metadata": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"channel": map[string]any{"type": "string"},
-						"primary_contact_name": map[string]any{"type": "string"},
+						"channel":                    map[string]any{"type": "string"},
+						"primary_contact_name":       map[string]any{"type": "string"},
 						"primary_contact_identifier": map[string]any{"type": "string"},
-						"user_name": map[string]any{"type": "string"},
-						"message_count": map[string]any{"type": "integer"},
+						"user_name":                  map[string]any{"type": "string"},
+						"message_count":              map[string]any{"type": "integer"},
 						"date_range": map[string]any{
 							"type": "object",
 							"properties": map[string]any{
 								"start": map[string]any{"type": "string"},
-								"end": map[string]any{"type": "string"},
+								"end":   map[string]any{"type": "string"},
 							},
 						},
 					},
-					"additionalProperties": true,
+					"additionalProperties": false,
 				},
-				"persons": map[string]any{
+				"facts": map[string]any{
 					"type": "array",
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"reference": map[string]any{"type": "string"},
-							"is_primary_contact": map[string]any{"type": "boolean"},
-							"confidence_is_primary": map[string]any{"type": "number"},
-							"pii": map[string]any{
-								"type":                 "object",
-								"additionalProperties": true,
+							"subject_kind": map[string]any{
+								"type": "string",
+								"enum": []string{"user", "primary_contact", "third_party"},
 							},
-							"sensitive_flags": map[string]any{
-								"type": "array",
-								"items": map[string]any{
-									"type":                 "object",
-									"additionalProperties": true,
-								},
+							"subject_ref": map[string]any{"type": "string"},
+							"category":    map[string]any{"type": "string"},
+							"fact_type":   map[string]any{"type": "string"},
+							"value":       map[string]any{"type": "string"},
+							"confidence": map[string]any{
+								"type": "string",
+								"enum": []string{"high", "medium", "low"},
 							},
+							"evidence":           map[string]any{"type": "string"},
+							"self_disclosed":     map[string]any{"type": "boolean"},
+							"source":             map[string]any{"type": "string"},
+							"related_person_ref": map[string]any{"type": "string"},
+							"note":               map[string]any{"type": "string"},
 						},
-						"required":             []string{"reference", "pii"},
-						"additionalProperties": true,
-					},
-				},
-				"new_identity_candidates": map[string]any{
-					"type": "array",
-					"items": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"reference": map[string]any{"type": "string"},
-							"known_facts": map[string]any{
-								"type":                 "object",
-								"additionalProperties": true,
-							},
-							"note": map[string]any{"type": "string"},
+						"required": []string{
+							"subject_kind",
+							"subject_ref",
+							"category",
+							"fact_type",
+							"value",
+							"confidence",
+							"evidence",
 						},
-						"required":             []string{"reference"},
-						"additionalProperties": true,
+						"additionalProperties": false,
 					},
 				},
 				"unattributed_facts": map[string]any{
@@ -1444,22 +1479,22 @@ func getResponseSchema(analysisTypeName string) any {
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"fact_type": map[string]any{"type": "string"},
+							"fact_type":  map[string]any{"type": "string"},
 							"fact_value": map[string]any{"type": "string"},
-							"shared_by": map[string]any{"type": "string"},
-							"context": map[string]any{"type": "string"},
+							"shared_by":  map[string]any{"type": "string"},
+							"context":    map[string]any{"type": "string"},
 							"possible_attributions": map[string]any{
-								"type": "array",
+								"type":  "array",
 								"items": map[string]any{"type": "string"},
 							},
 							"note": map[string]any{"type": "string"},
 						},
 						"required":             []string{"fact_type", "fact_value"},
-						"additionalProperties": true,
+						"additionalProperties": false,
 					},
 				},
 			},
-			"required": []string{"persons"},
+			"required": []string{"facts"},
 		}
 	default:
 		return nil

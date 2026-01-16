@@ -3,6 +3,7 @@ package adapters
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,8 +75,8 @@ func (a *AixAdapter) Sync(ctx context.Context, commsDB *sql.DB, full bool) (Sync
 	if full {
 		_, _ = commsDB.Exec("PRAGMA synchronous = OFF")
 		_, _ = commsDB.Exec("PRAGMA temp_store = MEMORY")
-		_, _ = commsDB.Exec("PRAGMA cache_size = -200000")        // ~200MB
-		_, _ = commsDB.Exec("PRAGMA mmap_size = 268435456")       // 256MB
+		_, _ = commsDB.Exec("PRAGMA cache_size = -200000")         // ~200MB
+		_, _ = commsDB.Exec("PRAGMA mmap_size = 268435456")        // 256MB
 		_, _ = commsDB.Exec("PRAGMA wal_autocheckpoint = 1000000") // reduce checkpoints
 	}
 	// Keep correctness while reducing per-statement overhead.
@@ -108,6 +109,19 @@ func (a *AixAdapter) Sync(ctx context.Context, commsDB *sql.DB, full bool) (Sync
 	lastEvent := ""
 	if lastEventID.Valid {
 		lastEvent = lastEventID.String
+	}
+
+	threadCreated, threadUpdated, threadPerf, err := a.syncSessions(aixDB, commsDB, lastSync, full)
+	if err != nil {
+		return result, err
+	}
+	result.ThreadsCreated = threadCreated
+	result.ThreadsUpdated = threadUpdated
+	if result.Perf == nil {
+		result.Perf = map[string]string{}
+	}
+	for k, v := range threadPerf {
+		result.Perf["threads_"+k] = v
 	}
 
 	// Create AI persons *before* the big write transaction to avoid SQLITE_BUSY from nested transactions.
@@ -303,6 +317,8 @@ func (a *AixAdapter) syncMessages(
 	perf = map[string]string{}
 
 	adapterPrefix := a.Name() + ":"
+	toolAdapter := a.Name() + "_tool"
+	toolAdapterPrefix := toolAdapter + ":"
 	threadPrefix := "aix_session:"
 	const contentTypesText = "[\"text\"]"
 
@@ -369,6 +385,36 @@ func (a *AixAdapter) syncMessages(
 		return 0, 0, 0, "", 0, perf, fmt.Errorf("prepare update event: %w", err)
 	}
 	defer stmtUpdateEvent.Close()
+
+	stmtInsertToolEvent, err := tx.Prepare(`
+		INSERT OR IGNORE INTO events (
+			id, timestamp, channel, content_types, content,
+			direction, thread_id, reply_to, source_adapter, source_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+	`)
+	if err != nil {
+		return 0, 0, 0, "", 0, perf, fmt.Errorf("prepare insert tool event: %w", err)
+	}
+	defer stmtInsertToolEvent.Close()
+
+	stmtUpdateToolEvent, err := tx.Prepare(`
+		UPDATE events
+		SET
+			content = ?,
+			content_types = ?,
+			thread_id = ?
+		WHERE source_adapter = ?
+		  AND source_id = ?
+		  AND (
+		    content IS NOT ?
+		    OR content_types IS NOT ?
+		    OR thread_id IS NOT ?
+		  )
+	`)
+	if err != nil {
+		return 0, 0, 0, "", 0, perf, fmt.Errorf("prepare update tool event: %w", err)
+	}
+	defer stmtUpdateToolEvent.Close()
 
 	stmtInsertParticipant, err := tx.Prepare(`
 		INSERT OR IGNORE INTO event_participants (event_id, person_id, role)
@@ -466,6 +512,83 @@ func (a *AixAdapter) syncMessages(
 	if err := rows.Err(); err != nil {
 		return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, err
 	}
+
+	// Sync tool invocations (terminal commands) from message metadata.
+	toolQuery := `
+		SELECT
+			m.id as message_id,
+			m.session_id,
+			CAST(COALESCE(m.timestamp, s.created_at) / 1000 AS INTEGER) as ts_sec,
+			mm.metadata_json
+		FROM messages m
+		JOIN sessions s ON m.session_id = s.id
+		JOIN message_metadata mm ON mm.message_id = m.id
+		WHERE s.source = ?
+		  AND (
+		    mm.metadata_json LIKE '%run_terminal_cmd%'
+		    OR mm.metadata_json LIKE '%run_terminal_command_v2%'
+		  )
+		  AND (
+		    CAST(COALESCE(m.timestamp, s.created_at) / 1000 AS INTEGER) > ?
+		    OR (CAST(COALESCE(m.timestamp, s.created_at) / 1000 AS INTEGER) = ? AND m.id > ?)
+		  )
+		ORDER BY ts_sec ASC, m.id ASC
+	`
+	toolQStart := time.Now()
+	toolRows, err := aixDB.Query(toolQuery, a.source, lastSyncSeconds, lastSyncSeconds, lastEventID)
+	if err != nil {
+		return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("failed to query aix tool metadata: %w", err)
+	}
+	defer toolRows.Close()
+	perf["tool_query"] = time.Since(toolQStart).String()
+
+	for toolRows.Next() {
+		var (
+			messageID string
+			sessionID string
+			tsSec     int64
+			metaJSON  string
+		)
+		if err := toolRows.Scan(&messageID, &sessionID, &tsSec, &metaJSON); err != nil {
+			return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("scan aix tool metadata: %w", err)
+		}
+
+		toolName, toolCallID, command, ok := parseToolFormerCommand(metaJSON)
+		if !ok || !isTerminalToolName(toolName) {
+			continue
+		}
+
+		sourceID := messageID
+		if toolCallID != "" {
+			sourceID = messageID + ":" + toolCallID
+		}
+		eventID := toolAdapterPrefix + sourceID
+		threadID := threadPrefix + sessionID
+
+		res, err := stmtInsertToolEvent.Exec(eventID, tsSec, "cursor", contentTypesText, command, "observed", threadID, toolAdapter, sourceID)
+		if err != nil {
+			return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("insert tool event: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			created++
+		} else {
+			res2, err := stmtUpdateToolEvent.Exec(
+				command, contentTypesText, threadID,
+				toolAdapter, sourceID,
+				command, contentTypesText, threadID,
+			)
+			if err != nil {
+				return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("update tool event: %w", err)
+			}
+			if n2, _ := res2.RowsAffected(); n2 == 1 {
+				updated++
+			}
+		}
+	}
+
+	if err := toolRows.Err(); err != nil {
+		return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, err
+	}
 	if err := tx.Commit(); err != nil {
 		return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("commit comms tx: %w", err)
 	}
@@ -482,6 +605,204 @@ func insertParticipant(db *sql.DB, eventID, personID, role string) error {
 	return err
 }
 
+func (a *AixAdapter) syncSessions(aixDB, commsDB *sql.DB, lastSyncSeconds int64, full bool) (threadsCreated int, threadsUpdated int, perf map[string]string, err error) {
+	perf = map[string]string{}
+
+	query := `
+		SELECT
+			id,
+			created_at,
+			model
+		FROM sessions
+		WHERE source = ?
+		ORDER BY created_at ASC, id ASC
+	`
+	args := []interface{}{a.source}
+	if !full {
+		query = `
+			SELECT
+				id,
+				created_at,
+				model
+			FROM sessions
+			WHERE source = ?
+			  AND CAST(COALESCE(created_at, 0) / 1000 AS INTEGER) > ?
+			ORDER BY created_at ASC, id ASC
+		`
+		args = append(args, lastSyncSeconds)
+	}
+
+	qStart := time.Now()
+	rows, err := aixDB.Query(query, args...)
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("failed to query aix sessions: %w", err)
+	}
+	defer rows.Close()
+	perf["query"] = time.Since(qStart).String()
+
+	txStart := time.Now()
+	tx, err := commsDB.Begin()
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("begin comms tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmtInsertThread, err := tx.Prepare(`
+		INSERT INTO threads (id, channel, name, source_adapter, source_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_adapter, source_id) DO UPDATE SET
+			name = excluded.name,
+			updated_at = excluded.updated_at
+	`)
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("prepare insert thread: %w", err)
+	}
+	defer stmtInsertThread.Close()
+
+	threadPrefix := "aix_session:"
+
+	for rows.Next() {
+		var (
+			sessionID string
+			createdAt sql.NullInt64
+			model     sql.NullString
+		)
+		if err := rows.Scan(&sessionID, &createdAt, &model); err != nil {
+			return threadsCreated, threadsUpdated, perf, fmt.Errorf("scan aix session: %w", err)
+		}
+
+		threadID := threadPrefix + sessionID
+		threadName := "Cursor Session"
+		if model.Valid && strings.TrimSpace(model.String) != "" {
+			threadName = strings.TrimSpace(model.String)
+		}
+
+		now := time.Now().Unix()
+		if createdAt.Valid && createdAt.Int64 > 0 {
+			now = createdAt.Int64 / 1000
+		}
+
+		res, err := stmtInsertThread.Exec(
+			threadID,
+			"cursor",
+			threadName,
+			a.Name(),
+			sessionID,
+			now,
+			now,
+		)
+		if err != nil {
+			return threadsCreated, threadsUpdated, perf, fmt.Errorf("upsert thread: %w", err)
+		}
+
+		var exists int
+		err = tx.QueryRow("SELECT 1 FROM threads WHERE source_adapter = ? AND source_id = ? AND updated_at < ?",
+			a.Name(), sessionID, now).Scan(&exists)
+		if err == sql.ErrNoRows {
+			threadsCreated++
+		} else if err == nil {
+			threadsUpdated++
+		} else {
+			if n, _ := res.RowsAffected(); n > 0 {
+				threadsCreated++
+			}
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return threadsCreated, threadsUpdated, perf, err
+	}
+	if err := tx.Commit(); err != nil {
+		return threadsCreated, threadsUpdated, perf, fmt.Errorf("commit comms tx: %w", err)
+	}
+	perf["tx_commit"] = time.Since(txStart).String()
+	return threadsCreated, threadsUpdated, perf, nil
+}
+
+type aixToolFormerData struct {
+	Name           string         `json:"name"`
+	Status         string         `json:"status"`
+	RawArgs        any            `json:"rawArgs"`
+	Params         any            `json:"params"`
+	AdditionalData map[string]any `json:"additionalData"`
+	ToolCallID     string         `json:"toolCallId"`
+}
+
+type aixMessageMeta struct {
+	ToolFormerData *aixToolFormerData `json:"toolFormerData"`
+}
+
+func parseToolFormerCommand(metaJSON string) (toolName, toolCallID, command string, ok bool) {
+	var meta aixMessageMeta
+	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+		return "", "", "", false
+	}
+	if meta.ToolFormerData == nil {
+		return "", "", "", false
+	}
+	toolName = strings.TrimSpace(meta.ToolFormerData.Name)
+	if toolName == "" {
+		return "", "", "", false
+	}
+	if !shouldRecordToolCommand(meta.ToolFormerData) {
+		return "", "", "", false
+	}
+	toolCallID = strings.TrimSpace(meta.ToolFormerData.ToolCallID)
+	command = extractToolCommand(meta.ToolFormerData.Params)
+	if command == "" {
+		command = extractToolCommand(meta.ToolFormerData.RawArgs)
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", "", "", false
+	}
+	return toolName, toolCallID, command, true
+}
+
+func shouldRecordToolCommand(tfd *aixToolFormerData) bool {
+	status := strings.ToLower(strings.TrimSpace(tfd.Status))
+	if status != "" && status != "completed" && status != "error" {
+		return false
+	}
+	adStatus := strings.ToLower(strings.TrimSpace(asString(tfd.AdditionalData["status"])))
+	switch adStatus {
+	case "cancelled", "pending", "running":
+		return false
+	}
+	return true
+}
+
+func extractToolCommand(val any) string {
+	switch v := val.(type) {
+	case string:
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(v), &payload); err != nil {
+			return ""
+		}
+		return asString(payload["command"])
+	case map[string]any:
+		return asString(v["command"])
+	default:
+		return ""
+	}
+}
+
+func asString(val any) string {
+	if s, ok := val.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func isTerminalToolName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "run_terminal_cmd", "run_terminal_command_v2":
+		return true
+	default:
+		return false
+	}
+}
+
 func defaultAixDBPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -495,4 +816,3 @@ func defaultAixDBPath() (string, error) {
 	}
 	return filepath.Join(home, ".local", "share", "aix", "aix.db"), nil
 }
-

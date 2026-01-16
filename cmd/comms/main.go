@@ -2523,12 +2523,12 @@ The algorithm runs in three phases:
 3. Soft identifier accumulation (weighted scoring)`,
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
-				OK                      bool `json:"ok"`
-				HardCollisions          int  `json:"hard_collisions"`
-				CompoundMatches         int  `json:"compound_matches"`
-				SoftAccumulations       int  `json:"soft_accumulations"`
-				MergeSuggestionsCreated int  `json:"merge_suggestions_created"`
-				AutoMergesExecuted      int  `json:"auto_merges_executed,omitempty"`
+				OK                      bool   `json:"ok"`
+				HardCollisions          int    `json:"hard_collisions"`
+				CompoundMatches         int    `json:"compound_matches"`
+				SoftAccumulations       int    `json:"soft_accumulations"`
+				MergeSuggestionsCreated int    `json:"merge_suggestions_created"`
+				AutoMergesExecuted      int    `json:"auto_merges_executed,omitempty"`
 				Message                 string `json:"message,omitempty"`
 			}
 
@@ -3343,13 +3343,13 @@ The algorithm runs in three phases:
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			type FactInfo struct {
-				Category  string  `json:"category"`
-				FactType  string  `json:"fact_type"`
-				FactValue string  `json:"fact_value"`
+				Category   string  `json:"category"`
+				FactType   string  `json:"fact_type"`
+				FactValue  string  `json:"fact_value"`
 				Confidence float64 `json:"confidence"`
-				Source    string  `json:"source,omitempty"`
-				Channel   string  `json:"channel,omitempty"`
-				Evidence  string  `json:"evidence,omitempty"`
+				Source     string  `json:"source,omitempty"`
+				Channel    string  `json:"channel,omitempty"`
+				Evidence   string  `json:"evidence,omitempty"`
 			}
 
 			type Result struct {
@@ -3557,14 +3557,14 @@ The algorithm runs in three phases:
 			}
 
 			categoryEmoji := map[string]string{
-				identify.CategoryCoreIdentity:  "👤",
-				identify.CategoryContactInfo:   "📞",
-				identify.CategoryProfessional:  "💼",
-				identify.CategoryRelationships: "👨‍👩‍👧‍👦",
-				identify.CategoryLocation:      "📍",
-				identify.CategoryEducation:     "🎓",
+				identify.CategoryCoreIdentity:    "👤",
+				identify.CategoryContactInfo:     "📞",
+				identify.CategoryProfessional:    "💼",
+				identify.CategoryRelationships:   "👨‍👩‍👧‍👦",
+				identify.CategoryLocation:        "📍",
+				identify.CategoryEducation:       "🎓",
 				identify.CategoryDigitalIdentity: "🌐",
-				identify.CategoryGovernmentID:  "🪪",
+				identify.CategoryGovernmentID:    "🪪",
 			}
 
 			for _, cat := range categoryOrder {
@@ -4625,9 +4625,9 @@ Examples:
 		Long:  "Show all conversation definitions and their configurations",
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
-				OK          bool                 `json:"ok"`
-				Message     string               `json:"message,omitempty"`
-				Definitions []chunk.Definition   `json:"definitions,omitempty"`
+				OK          bool               `json:"ok"`
+				Message     string             `json:"message,omitempty"`
+				Definitions []chunk.Definition `json:"definitions,omitempty"`
 			}
 
 			database, err := db.Open()
@@ -4742,6 +4742,21 @@ Examples:
 			}
 			created++
 
+			// Create cursor_session definition
+			cursorThreadConfig := chunk.ThreadConfig{}
+			_, err = chunk.CreateDefinition(ctx, database, "cursor_session", "cursor", "thread", cursorThreadConfig,
+				"Cursor sessions (one conversation per session thread)")
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to create cursor_session: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			created++
+
 			result := Result{OK: true, Created: created}
 
 			if jsonOutput {
@@ -4750,6 +4765,7 @@ Examples:
 				fmt.Printf("Created %d conversation definition(s):\n", created)
 				fmt.Println("  - imessage_3hr (3-hour gap, thread-scoped)")
 				fmt.Println("  - gmail_thread (native Gmail threads)")
+				fmt.Println("  - cursor_session (Cursor sessions by thread)")
 			}
 		},
 	}
@@ -4969,11 +4985,11 @@ Examples:
 				}
 				if jsonOutput {
 					printJSON(map[string]any{
-						"ok":           err == nil,
+						"ok":            err == nil,
 						"conversations": c1,
-						"facets":       c2,
-						"persons":      c3,
-						"total":        count,
+						"facets":        c2,
+						"persons":       c3,
+						"total":         count,
 					})
 					return
 				}
@@ -5275,12 +5291,74 @@ Conversation:
 				os.Exit(1)
 			}
 
+			// Seed nexus_cli_invocations_v1 analysis type (local extraction)
+			nexusCliPromptTemplate := `# Nexus CLI Invocation Extraction
+
+This analysis is generated locally from tool invocation events.
+Conversation:
+{{{conversation_text}}}`
+
+			nexusCliFacetsConfig := `{
+				"mappings": [
+					{"json_path": "invocations[]", "facet_type": "nexus_invocation"},
+					{"json_path": "commands[]", "facet_type": "nexus_command"},
+					{"json_path": "subcommands[]", "facet_type": "nexus_subcommand"},
+					{"json_path": "binaries[]", "facet_type": "nexus_binary"}
+				]
+			}`
+
+			_, err = database.ExecContext(ctx, `
+				INSERT INTO analysis_types (id, name, version, description, output_type, facets_config_json, prompt_template, model, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(name) DO NOTHING
+			`, "nexus_cli_invocations_v1", "nexus_cli_invocations", "1.0.0",
+				"Extract nexus CLI invocations from Cursor tool executions",
+				"structured", nexusCliFacetsConfig, nexusCliPromptTemplate,
+				"local", now, now)
+
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error seeding nexus_cli_invocations_v1: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Seed terminal_invocations_v1 analysis type (local extraction)
+			terminalPromptTemplate := `# Terminal Invocation Extraction
+
+This analysis is generated locally from tool invocation events.
+Conversation:
+{{{conversation_text}}}`
+
+			terminalFacetsConfig := `{
+				"mappings": [
+					{"json_path": "invocations[]", "facet_type": "terminal_invocation"},
+					{"json_path": "commands[]", "facet_type": "terminal_command"},
+					{"json_path": "subcommands[]", "facet_type": "terminal_subcommand"},
+					{"json_path": "binaries[]", "facet_type": "terminal_binary"}
+				]
+			}`
+
+			_, err = database.ExecContext(ctx, `
+				INSERT INTO analysis_types (id, name, version, description, output_type, facets_config_json, prompt_template, model, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(name) DO NOTHING
+			`, "terminal_invocations_v1", "terminal_invocations", "1.0.0",
+				"Extract terminal command invocations from Cursor tool executions",
+				"structured", terminalFacetsConfig, terminalPromptTemplate,
+				"local", now, now)
+
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error seeding terminal_invocations_v1: %v\n", err)
+				os.Exit(1)
+			}
+
 			if jsonOutput {
 				printJSON(map[string]any{"ok": true, "message": "Seeded analysis types"})
 			} else {
 				fmt.Println("Seeded analysis types:")
 				fmt.Println("  - convo-all-v1 (structured extraction)")
 				fmt.Println("  - pii_extraction_v1 (PII extraction for identity resolution)")
+				fmt.Println("  - nexus_cli_invocations_v1 (nexus CLI extraction)")
+				fmt.Println("  - terminal_invocations_v1 (terminal command extraction)")
 			}
 		},
 	}
@@ -5557,10 +5635,10 @@ Examples:
   comms extract pii --person "Dad" --limit 50`,
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
-				OK               bool   `json:"ok"`
-				JobsEnqueued     int    `json:"jobs_enqueued"`
-				ConversationsToProcess int `json:"conversations_to_process,omitempty"`
-				Message          string `json:"message,omitempty"`
+				OK                     bool   `json:"ok"`
+				JobsEnqueued           int    `json:"jobs_enqueued"`
+				ConversationsToProcess int    `json:"conversations_to_process,omitempty"`
+				Message                string `json:"message,omitempty"`
 			}
 
 			database, err := db.Open()
@@ -5759,6 +5837,390 @@ Examples:
 	extractPIICmd.Flags().IntVar(&extractLimit, "limit", 0, "Limit number of conversations to process")
 	extractPIICmd.Flags().StringVar(&extractDefinition, "definition", "", "Filter by conversation definition name")
 
+	// extract nexus-cli - extract nexus CLI invocations from conversations
+	var extractNexusChannel string
+	var extractNexusSince string
+	var extractNexusConversation string
+	var extractNexusDryRun bool
+	var extractNexusLimit int
+	var extractNexusDefinition string
+
+	extractNexusCmd := &cobra.Command{
+		Use:   "nexus-cli",
+		Short: "Extract nexus CLI invocations from Cursor sessions",
+		Long: `Extract nexus CLI invocations from Cursor tool executions.
+
+Examples:
+  comms extract nexus-cli --channel cursor --since 15d
+  comms extract nexus-cli --definition cursor_session --since 15d`,
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK                     bool   `json:"ok"`
+				JobsEnqueued           int    `json:"jobs_enqueued"`
+				ConversationsToProcess int    `json:"conversations_to_process,omitempty"`
+				Message                string `json:"message,omitempty"`
+			}
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			querySQL := `
+				SELECT c.id FROM conversations c
+				WHERE NOT EXISTS (
+					SELECT 1 FROM analysis_runs ar
+					JOIN analysis_types at ON ar.analysis_type_id = at.id
+					WHERE ar.conversation_id = c.id
+					AND at.name = 'nexus_cli_invocations'
+				)
+			`
+			var queryArgs []interface{}
+			var defID string
+			var hasDefinition bool
+
+			if extractNexusDefinition != "" {
+				err := database.QueryRow(`SELECT id FROM conversation_definitions WHERE name = ?`, extractNexusDefinition).Scan(&defID)
+				if err != nil {
+					result := Result{OK: false, Message: fmt.Sprintf("Definition '%s' not found", extractNexusDefinition)}
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+				hasDefinition = true
+				querySQL += ` AND c.definition_id = ?`
+				queryArgs = append(queryArgs, defID)
+			}
+
+			if extractNexusChannel != "" {
+				querySQL += ` AND c.channel = ?`
+				queryArgs = append(queryArgs, extractNexusChannel)
+			}
+
+			if extractNexusSince != "" {
+				var sinceTime time.Time
+				if strings.HasSuffix(extractNexusSince, "d") {
+					var d int
+					fmt.Sscanf(extractNexusSince, "%dd", &d)
+					if d > 0 {
+						sinceTime = time.Now().AddDate(0, 0, -d)
+					}
+				} else if strings.HasSuffix(extractNexusSince, "h") {
+					var h int
+					fmt.Sscanf(extractNexusSince, "%dh", &h)
+					if h > 0 {
+						sinceTime = time.Now().Add(-time.Duration(h) * time.Hour)
+					}
+				} else {
+					sinceTime, _ = time.Parse("2006-01-02", extractNexusSince)
+				}
+				if !sinceTime.IsZero() {
+					querySQL += ` AND c.start_time >= ?`
+					queryArgs = append(queryArgs, sinceTime.Unix())
+				}
+			}
+
+			if extractNexusConversation != "" {
+				querySQL = `SELECT c.id FROM conversations c WHERE c.id = ?`
+				queryArgs = []interface{}{extractNexusConversation}
+				if hasDefinition {
+					querySQL += ` AND c.definition_id = ?`
+					queryArgs = append(queryArgs, defID)
+				}
+			}
+
+			querySQL += ` ORDER BY c.start_time DESC`
+			if extractNexusLimit > 0 {
+				querySQL += fmt.Sprintf(` LIMIT %d`, extractNexusLimit)
+			}
+
+			rows, err := database.Query(querySQL, queryArgs...)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to query conversations: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			var convIDs []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					continue
+				}
+				convIDs = append(convIDs, id)
+			}
+			rows.Close()
+
+			if extractNexusDryRun {
+				result := Result{
+					OK:                     true,
+					ConversationsToProcess: len(convIDs),
+					Message:                fmt.Sprintf("Would enqueue %d conversations for nexus CLI extraction", len(convIDs)),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Printf("Dry run: would enqueue %d conversations for nexus CLI extraction\n", len(convIDs))
+					if len(convIDs) > 0 && len(convIDs) <= 10 {
+						fmt.Println("\nConversations:")
+						for _, id := range convIDs {
+							fmt.Printf("  %s\n", id)
+						}
+					}
+				}
+				return
+			}
+
+			geminiClient := gemini.NewClient("")
+			engine, err := compute.NewEngine(database, geminiClient, compute.DefaultConfig())
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to create compute engine: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			ctx := context.Background()
+			count, err := engine.EnqueueAnalysis(ctx, "nexus_cli_invocations", convIDs...)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to enqueue analysis: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{
+				OK:           true,
+				JobsEnqueued: count,
+				Message:      fmt.Sprintf("Enqueued %d nexus CLI extraction jobs", count),
+			}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Printf("✓ Enqueued %d nexus CLI extraction jobs\n", count)
+				fmt.Println("\nRun 'comms compute run' to process the queue")
+			}
+		},
+	}
+	extractNexusCmd.Flags().StringVar(&extractNexusChannel, "channel", "", "Filter by channel (cursor, etc.)")
+	extractNexusCmd.Flags().StringVar(&extractNexusSince, "since", "", "Only process conversations since (e.g., 15d, 7d, 2024-01-01)")
+	extractNexusCmd.Flags().StringVar(&extractNexusConversation, "conversation", "", "Process specific conversation ID")
+	extractNexusCmd.Flags().BoolVar(&extractNexusDryRun, "dry-run", false, "Show what would be processed without enqueueing")
+	extractNexusCmd.Flags().IntVar(&extractNexusLimit, "limit", 0, "Limit number of conversations to process")
+	extractNexusCmd.Flags().StringVar(&extractNexusDefinition, "definition", "", "Filter by conversation definition name")
+
+	// extract terminal - extract terminal command invocations
+	var extractTerminalChannel string
+	var extractTerminalSince string
+	var extractTerminalConversation string
+	var extractTerminalDryRun bool
+	var extractTerminalLimit int
+	var extractTerminalDefinition string
+
+	extractTerminalCmd := &cobra.Command{
+		Use:   "terminal",
+		Short: "Extract terminal command invocations from Cursor sessions",
+		Long: `Extract terminal command invocations from Cursor tool executions.
+
+Examples:
+  comms extract terminal --channel cursor --since 15d
+  comms extract terminal --definition cursor_session --since 15d`,
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK                     bool   `json:"ok"`
+				JobsEnqueued           int    `json:"jobs_enqueued"`
+				ConversationsToProcess int    `json:"conversations_to_process,omitempty"`
+				Message                string `json:"message,omitempty"`
+			}
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			querySQL := `
+				SELECT c.id FROM conversations c
+				WHERE NOT EXISTS (
+					SELECT 1 FROM analysis_runs ar
+					JOIN analysis_types at ON ar.analysis_type_id = at.id
+					WHERE ar.conversation_id = c.id
+					AND at.name = 'terminal_invocations'
+				)
+			`
+			var queryArgs []interface{}
+			var defID string
+			var hasDefinition bool
+
+			if extractTerminalDefinition != "" {
+				err := database.QueryRow(`SELECT id FROM conversation_definitions WHERE name = ?`, extractTerminalDefinition).Scan(&defID)
+				if err != nil {
+					result := Result{OK: false, Message: fmt.Sprintf("Definition '%s' not found", extractTerminalDefinition)}
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+				hasDefinition = true
+				querySQL += ` AND c.definition_id = ?`
+				queryArgs = append(queryArgs, defID)
+			}
+
+			if extractTerminalChannel != "" {
+				querySQL += ` AND c.channel = ?`
+				queryArgs = append(queryArgs, extractTerminalChannel)
+			}
+
+			if extractTerminalSince != "" {
+				var sinceTime time.Time
+				if strings.HasSuffix(extractTerminalSince, "d") {
+					var d int
+					fmt.Sscanf(extractTerminalSince, "%dd", &d)
+					if d > 0 {
+						sinceTime = time.Now().AddDate(0, 0, -d)
+					}
+				} else if strings.HasSuffix(extractTerminalSince, "h") {
+					var h int
+					fmt.Sscanf(extractTerminalSince, "%dh", &h)
+					if h > 0 {
+						sinceTime = time.Now().Add(-time.Duration(h) * time.Hour)
+					}
+				} else {
+					sinceTime, _ = time.Parse("2006-01-02", extractTerminalSince)
+				}
+				if !sinceTime.IsZero() {
+					querySQL += ` AND c.start_time >= ?`
+					queryArgs = append(queryArgs, sinceTime.Unix())
+				}
+			}
+
+			if extractTerminalConversation != "" {
+				querySQL = `SELECT c.id FROM conversations c WHERE c.id = ?`
+				queryArgs = []interface{}{extractTerminalConversation}
+				if hasDefinition {
+					querySQL += ` AND c.definition_id = ?`
+					queryArgs = append(queryArgs, defID)
+				}
+			}
+
+			querySQL += ` ORDER BY c.start_time DESC`
+			if extractTerminalLimit > 0 {
+				querySQL += fmt.Sprintf(` LIMIT %d`, extractTerminalLimit)
+			}
+
+			rows, err := database.Query(querySQL, queryArgs...)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to query conversations: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			var convIDs []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					continue
+				}
+				convIDs = append(convIDs, id)
+			}
+			rows.Close()
+
+			if extractTerminalDryRun {
+				result := Result{
+					OK:                     true,
+					ConversationsToProcess: len(convIDs),
+					Message:                fmt.Sprintf("Would enqueue %d conversations for terminal extraction", len(convIDs)),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Printf("Dry run: would enqueue %d conversations for terminal extraction\n", len(convIDs))
+					if len(convIDs) > 0 && len(convIDs) <= 10 {
+						fmt.Println("\nConversations:")
+						for _, id := range convIDs {
+							fmt.Printf("  %s\n", id)
+						}
+					}
+				}
+				return
+			}
+
+			geminiClient := gemini.NewClient("")
+			engine, err := compute.NewEngine(database, geminiClient, compute.DefaultConfig())
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to create compute engine: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			ctx := context.Background()
+			count, err := engine.EnqueueAnalysis(ctx, "terminal_invocations", convIDs...)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to enqueue analysis: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{
+				OK:           true,
+				JobsEnqueued: count,
+				Message:      fmt.Sprintf("Enqueued %d terminal extraction jobs", count),
+			}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Printf("✓ Enqueued %d terminal extraction jobs\n", count)
+				fmt.Println("\nRun 'comms compute run' to process the queue")
+			}
+		},
+	}
+	extractTerminalCmd.Flags().StringVar(&extractTerminalChannel, "channel", "", "Filter by channel (cursor, etc.)")
+	extractTerminalCmd.Flags().StringVar(&extractTerminalSince, "since", "", "Only process conversations since (e.g., 15d, 7d, 2024-01-01)")
+	extractTerminalCmd.Flags().StringVar(&extractTerminalConversation, "conversation", "", "Process specific conversation ID")
+	extractTerminalCmd.Flags().BoolVar(&extractTerminalDryRun, "dry-run", false, "Show what would be processed without enqueueing")
+	extractTerminalCmd.Flags().IntVar(&extractTerminalLimit, "limit", 0, "Limit number of conversations to process")
+	extractTerminalCmd.Flags().StringVar(&extractTerminalDefinition, "definition", "", "Filter by conversation definition name")
+
 	// extract sync - sync facets to person_facts
 	extractSyncCmd := &cobra.Command{
 		Use:   "sync",
@@ -5766,13 +6228,13 @@ Examples:
 		Long:  "Process completed PII extraction analysis runs and sync facets to person_facts",
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
-				OK                    bool `json:"ok"`
-				AnalysisRunsProcessed int  `json:"analysis_runs_processed"`
-				FacetsProcessed       int  `json:"facets_processed"`
-				FactsCreated          int  `json:"facts_created"`
-				UnattributedCreated   int  `json:"unattributed_created"`
-				ThirdPartiesCreated   int  `json:"third_parties_created"`
-				Errors                int  `json:"errors"`
+				OK                    bool   `json:"ok"`
+				AnalysisRunsProcessed int    `json:"analysis_runs_processed"`
+				FacetsProcessed       int    `json:"facets_processed"`
+				FactsCreated          int    `json:"facts_created"`
+				UnattributedCreated   int    `json:"unattributed_created"`
+				ThirdPartiesCreated   int    `json:"third_parties_created"`
+				Errors                int    `json:"errors"`
 				Message               string `json:"message,omitempty"`
 			}
 
@@ -5830,14 +6292,14 @@ Examples:
 		Short: "Show PII extraction status",
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
-				OK                bool `json:"ok"`
-				TotalConversations int `json:"total_conversations"`
-				Pending           int  `json:"pending"`
-				Running           int  `json:"running"`
-				Completed         int  `json:"completed"`
-				Failed            int  `json:"failed"`
-				Blocked           int  `json:"blocked"`
-				Message           string `json:"message,omitempty"`
+				OK                 bool   `json:"ok"`
+				TotalConversations int    `json:"total_conversations"`
+				Pending            int    `json:"pending"`
+				Running            int    `json:"running"`
+				Completed          int    `json:"completed"`
+				Failed             int    `json:"failed"`
+				Blocked            int    `json:"blocked"`
+				Message            string `json:"message,omitempty"`
 			}
 
 			database, err := db.Open()
@@ -5909,6 +6371,8 @@ Examples:
 	}
 
 	extractCmd.AddCommand(extractPIICmd)
+	extractCmd.AddCommand(extractNexusCmd)
+	extractCmd.AddCommand(extractTerminalCmd)
 	extractCmd.AddCommand(extractSyncCmd)
 	extractCmd.AddCommand(extractStatusCmd)
 	rootCmd.AddCommand(extractCmd)
