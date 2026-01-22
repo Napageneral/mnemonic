@@ -79,3 +79,21 @@
 - Table has IF NOT EXISTS clause for safe re-application
 - Indexes also use IF NOT EXISTS for idempotent schema application
 
+---
+## 2026-01-21 - [MS-003] Add entity_aliases table to schema
+- Added `entity_aliases` table to schema.sql following spec §3.4
+- Columns: id, entity_id (FK to entities), alias, alias_type, normalized, is_shared, created_at
+- NO UNIQUE constraint on alias - same alias can map to multiple entities (family phone, team email)
+- Added indexes: idx_entity_aliases_lookup (alias, alias_type), idx_entity_aliases_normalized (normalized, alias_type), idx_entity_aliases_entity (entity_id)
+- Schema version incremented from 14 to 15
+- alias_type values: 'name', 'email', 'phone', 'handle', 'username', 'nickname'
+
+**Files changed:**
+- `internal/db/schema.sql` - Added entity_aliases table and indexes
+
+**Learnings:**
+- Entity aliases are intentionally NOT unique to support shared identifiers (family phone, team email)
+- is_shared BOOLEAN field tracks when multiple entities share an alias for disambiguation during resolution
+- Identity relationships (HAS_EMAIL, HAS_PHONE, HAS_HANDLE) get promoted to aliases table, not stored in relationships table
+- normalized column enables case-insensitive matching without runtime LOWER() calls
+

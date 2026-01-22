@@ -554,9 +554,34 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type_id);
 CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(canonical_name);
 
+-- ============================================
+-- ENTITY ALIASES (identity resolution)
+-- ============================================
+-- Stores identity markers: email, phone, handles, name variants.
+-- ALIASES CAN BE SHARED: family phone, team email can map to multiple entities.
+-- When resolving, shared aliases require disambiguation.
+-- When merging entities, reassign loser's aliases to winner.
+--
+-- Identity relationships (HAS_EMAIL, HAS_PHONE, HAS_HANDLE) are promoted here
+-- rather than stored in the relationships table. See §4.4.
+CREATE TABLE IF NOT EXISTS entity_aliases (
+    id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL REFERENCES entities(id),
+    alias TEXT NOT NULL,
+    alias_type TEXT NOT NULL,  -- 'name', 'email', 'phone', 'handle', 'username', 'nickname'
+    normalized TEXT,           -- Lowercase/cleaned for matching
+    is_shared BOOLEAN DEFAULT FALSE,  -- TRUE if multiple entities share this alias
+    created_at TEXT NOT NULL
+    -- NOTE: No UNIQUE constraint - same alias can map to multiple entities
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_aliases_lookup ON entity_aliases(alias, alias_type);
+CREATE INDEX IF NOT EXISTS idx_entity_aliases_normalized ON entity_aliases(normalized, alias_type);
+CREATE INDEX IF NOT EXISTS idx_entity_aliases_entity ON entity_aliases(entity_id);
+
 -- Insert initial schema version
 INSERT OR IGNORE INTO schema_version (version, applied_at)
-VALUES (14, strftime('%s', 'now'));
+VALUES (15, strftime('%s', 'now'));
 
 -- NOTE: pii_extraction_v1 analysis type is now registered via `cortex compute seed` command
 -- This matches the pattern used for convo-all-v1 and is more maintainable
