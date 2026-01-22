@@ -1,9 +1,9 @@
-# Cursor Tool Invocation Pipeline (AIX → Comms)
+# Cursor Tool Invocation Pipeline (AIX → Cortex)
 
 This document describes how we ingest Cursor session logs, extract terminal
 invocations, and produce ordered facets for analysis. It also captures the
 Cursor-specific idiosyncrasies we learned and how we used the pipeline in
-comms to backfill nexus CLI usage.
+cortex to backfill nexus CLI usage.
 
 ## Why This Exists
 
@@ -22,14 +22,14 @@ than LLM extraction.
 flowchart LR
   CursorDB["Cursor SQLite DB"]
   AIX["aix sync"]
-  CommsSync["comms sync --adapter cursor"]
-  Events["comms.events + comms.threads"]
-  Chunk["cursor_session conversations"]
+  CortexSync["cortex sync --adapter cursor"]
+  Events["cortex.events + cortex.threads"]
+  Chunk["ai_session segments"]
   ExtractTerminal["terminal_invocations analysis"]
   ExtractNexus["nexus_cli_invocations analysis"]
-  Facets["comms.facets"]
+  Facets["cortex.facets"]
 
-  CursorDB --> AIX --> CommsSync --> Events --> Chunk
+  CursorDB --> AIX --> CortexSync --> Events --> Chunk
   Chunk --> ExtractTerminal --> Facets
   Chunk --> ExtractNexus --> Facets
 ```
@@ -62,12 +62,12 @@ Terminal commands are stored as events:
 - `events.content = <raw command>`
 - `events.thread_id = aix_session:<session_id>`
 
-### Conversations
+### Segments
 
-We chunk sessions into ordered conversations:
-- `cursor_session` definition
-- one conversation per session thread
-- ordering preserved via `conversation_events.position`
+We chunk sessions into ordered segments:
+- `ai_session` definition
+- one segment per session thread
+- ordering preserved via `segment_events.position`
 
 ### Invocation JSON (Structured Output)
 
@@ -92,7 +92,7 @@ Terminal and nexus CLI analysis emit JSON per invocation:
 - `wrapper:<wrapper>`: launched by `pnpm`, `npx`, `npm exec`, `yarn dlx`
 - `cargo_run`: launched via `cargo run -p cli -- ...`
 
-## What We Used It For (Comms)
+## What We Used It For (Cortex)
 
 We used this pipeline to backfill nexus CLI usage from Cursor logs:
 - direct `nexus` / `nexus-cloud` invocations
@@ -116,23 +116,23 @@ We also added a generic extractor for all terminal commands:
 # 1) Sync Cursor sessions into AIX
 aix sync --source cursor
 
-# 2) Import into comms
-comms sync --adapter cursor
+# 2) Import into cortex
+cortex sync --adapter cursor
 
-# 3) Build cursor session conversations
-comms chunk seed
-comms chunk run --definition cursor_session
+# 3) Build AI session segments
+cortex chunk seed
+cortex chunk run --definition ai_session
 
 # 4) Seed analysis types
-comms compute seed
+cortex compute seed
 
 # 5) Extract terminal usage (generic)
-comms extract terminal --channel cursor --definition cursor_session --since 15d
-comms compute run
+cortex extract terminal --channel cursor --definition ai_session --since 15d
+cortex compute run
 
 # 6) Extract nexus CLI usage (normalized)
-comms extract nexus-cli --channel cursor --definition cursor_session --since 15d
-comms compute run
+cortex extract nexus-cli --channel cursor --definition ai_session --since 15d
+cortex compute run
 ```
 
 ## Future Extensions

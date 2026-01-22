@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/Napageneral/cortex/internal/chunk"
 	"github.com/google/uuid"
 )
 
@@ -28,6 +28,7 @@ type aixMetadataFull struct {
 	RelevantFiles    []string               `json:"relevantFiles"`
 	Lints            []interface{}          `json:"lints"`
 	CapabilitiesRan  map[string][]int       `json:"capabilitiesRan"`
+	CapabilityStatuses map[string][]int     `json:"capabilityStatuses"`
 	ToolFormerData   *aixToolFormerData     `json:"toolFormerData"`
 	SupportedTools   []int                  `json:"supportedTools"`
 	WebReferences    []interface{}          `json:"webReferences"`
@@ -61,27 +62,28 @@ func (e *AIXFacetExtractor) ExtractFacetsFromMetadata(ctx context.Context, chann
 	}
 
 	// Get or create segment definition for single-event AIX segments
-	segmentDefID, err := e.ensureSegmentDefinition(ctx, channel)
+	segmentDefID, err := e.ensureSegmentDefinition(ctx)
 	if err != nil {
 		return result, fmt.Errorf("ensure segment definition: %w", err)
 	}
 
 	// Query events with metadata that haven't been processed yet
-	// Using LEFT JOIN for better performance than NOT EXISTS
 	query := `
 		SELECT e.id, e.timestamp, e.channel, e.thread_id, e.metadata_json
 		FROM events e
-		LEFT JOIN segment_events se ON se.event_id = e.id
-		LEFT JOIN segments s ON s.id = se.segment_id AND s.definition_id = ?
 		WHERE e.metadata_json IS NOT NULL
 		  AND e.channel = ?
 		  AND e.timestamp > ?
-		  AND s.id IS NULL
+		  AND NOT EXISTS (
+		    SELECT 1 FROM segment_events se
+		    JOIN segments s ON s.id = se.segment_id
+		    WHERE se.event_id = e.id AND s.definition_id = ?
+		  )
 		ORDER BY e.timestamp ASC
 		LIMIT 500
 	`
 
-	rows, err := e.db.QueryContext(ctx, query, segmentDefID, channel, since)
+	rows, err := e.db.QueryContext(ctx, query, channel, since, segmentDefID)
 	if err != nil {
 		return result, fmt.Errorf("query events: %w", err)
 	}
@@ -225,6 +227,9 @@ func hasExtractableFacets(meta aixMetadataFull) bool {
 	if meta.IsAgentic {
 		return true
 	}
+	if hasNonEmptyCaps(meta.CapabilitiesRan) || hasNonEmptyCaps(meta.CapabilityStatuses) {
+		return true
+	}
 	if len(meta.WebReferences) > 0 || len(meta.DocsReferences) > 0 {
 		return true
 	}
@@ -282,22 +287,47 @@ func extractFacetsFromMeta(meta aixMetadataFull, runID, segmentID string, now in
 	}
 
 	// Extract capabilities used
+	seenCaps := map[string]struct{}{}
+	addCap := func(capType string, count int) {
+		if capType == "" {
+			return
+		}
+		if _, ok := seenCaps[capType]; ok {
+			return
+		}
+		seenCaps[capType] = struct{}{}
+		facets = append(facets, facetRow{
+			ID:            uuid.New().String(),
+			AnalysisRunID: runID,
+			SegmentID:     segmentID,
+			FacetType:     "capability",
+			Value:         capType,
+			Confidence:    1.0,
+			MetadataJSON:  fmt.Sprintf(`{"count":%d}`, count),
+			CreatedAt:     now,
+		})
+	}
 	for capType, caps := range meta.CapabilitiesRan {
 		if len(caps) > 0 {
-			facets = append(facets, facetRow{
-				ID:            uuid.New().String(),
-				AnalysisRunID: runID,
-				SegmentID:     segmentID,
-				FacetType:     "capability",
-				Value:         capType,
-				Confidence:    1.0,
-				MetadataJSON:  fmt.Sprintf(`{"count":%d}`, len(caps)),
-				CreatedAt:     now,
-			})
+			addCap(capType, len(caps))
+		}
+	}
+	for capType, caps := range meta.CapabilityStatuses {
+		if len(caps) > 0 {
+			addCap(capType, len(caps))
 		}
 	}
 
 	return facets
+}
+
+func hasNonEmptyCaps(values map[string][]int) bool {
+	for _, v := range values {
+		if len(v) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *AIXFacetExtractor) ensureAnalysisType(ctx context.Context) (string, error) {
@@ -326,33 +356,15 @@ func (e *AIXFacetExtractor) ensureAnalysisType(ctx context.Context) (string, err
 	return id, nil
 }
 
-func (e *AIXFacetExtractor) ensureSegmentDefinition(ctx context.Context, channel string) (string, error) {
-	defName := "aix_single_event"
-	if channel != "" {
-		defName = fmt.Sprintf("aix_single_event_%s", strings.ReplaceAll(channel, "-", "_"))
-	}
-
-	var id string
-	err := e.db.QueryRowContext(ctx, `SELECT id FROM segment_definitions WHERE name = ?`, defName).Scan(&id)
-	if err == nil {
-		return id, nil
-	}
-	if err != sql.ErrNoRows {
-		return "", err
-	}
-
-	// Create the segment definition
-	id = uuid.New().String()
-	now := time.Now().Unix()
-	config := `{"source_adapter":"cursor"}`
-	
-	_, err = e.db.ExecContext(ctx, `
-		INSERT INTO segment_definitions (id, name, channel, strategy, config_json, description, created_at, updated_at)
-		VALUES (?, ?, ?, 'single_event', ?, 'Single-event segments for AIX metadata extraction', ?, ?)
-	`, id, defName, channel, config, now, now)
-	if err != nil {
-		return "", fmt.Errorf("create segment definition: %w", err)
-	}
-
-	return id, nil
+func (e *AIXFacetExtractor) ensureSegmentDefinition(ctx context.Context) (string, error) {
+	config := chunk.SingleEventConfig{}
+	return chunk.CreateDefinition(
+		ctx,
+		e.db,
+		"single_event",
+		"",
+		"single_event",
+		config,
+		"Single-event segments (one event per event)",
+	)
 }

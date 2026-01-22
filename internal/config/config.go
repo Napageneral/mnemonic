@@ -31,6 +31,13 @@ type Identity struct {
 type AdapterConfig struct {
 	Type    string                 `yaml:"type"`
 	Enabled bool                   `yaml:"enabled"`
+	Live    *LiveConfig            `yaml:"live,omitempty"`
+	Options map[string]interface{} `yaml:"options,omitempty"`
+}
+
+// LiveConfig controls live watching for an adapter.
+type LiveConfig struct {
+	Enabled bool                   `yaml:"enabled"`
 	Options map[string]interface{} `yaml:"options,omitempty"`
 }
 

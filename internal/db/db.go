@@ -42,6 +42,11 @@ func Init() error {
 	_, _ = db.Exec("PRAGMA busy_timeout = 30000")
 	_, _ = db.Exec("PRAGMA foreign_keys = ON")
 
+	// Ensure legacy columns exist before applying schema (prevents index errors).
+	if err := ensureLegacyColumns(db); err != nil {
+		return err
+	}
+
 	// Execute schema
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("failed to create schema: %w", err)
@@ -99,4 +104,68 @@ func GetPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dataDir, "cortex.db"), nil
+}
+
+func ensureLegacyColumns(db *sql.DB) error {
+	// Columns added after earlier schema versions.
+	if err := ensureColumn(db, "person_facts", "source_segment_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "unattributed_facts", "source_segment_id", "TEXT REFERENCES segments(id)"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "candidate_mentions", "source_segment_id", "TEXT REFERENCES segments(id)"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureColumn(db *sql.DB, table, column, definition string) error {
+	if !tableExists(db, table) {
+		return nil
+	}
+	has, err := columnExists(db, table, column)
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
+	if err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+func tableExists(db *sql.DB, table string) bool {
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
+	return err == nil
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }

@@ -2,17 +2,16 @@
 
 ## Purpose
 
-Analyze **user feedback immediately after a checkpoint** to detect quality signals.
+Analyze **user messages** in a turn segment to detect quality signals about the prior response.
 We want to know if the user accepted the response, corrected it, or expressed frustration.
 
 ## Input
 
-- **Assistant response** at the checkpoint
-- **User feedback window** (next N user replies before the next assistant response)
+- A turn segment containing one or more **User** messages (and possibly Assistant text)
 
 ## Task
 
-For each user reply, extract:
+For each user message, extract:
 
 1. sentiment: positive / neutral / negative
 2. correction: did the user correct the assistant?
@@ -60,6 +59,12 @@ Also compute aggregates:
 - Output **valid JSON only**
 - Be conservative: only flag correction/frustration when clearly present
 - Evidence quotes must be exact snippets from user messages
+- Always include **all fields** shown in the output format (no omissions)
+- If a field is unknown, still include it with a sensible default:
+  - sentiment: "neutral"
+  - correction/frustration/praise/confusion/acceptance: false
+  - evidence: []
+- Always include the aggregate block (even if all counts are zero)
 
 ---
 

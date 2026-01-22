@@ -27,6 +27,141 @@ func NewSearcher(db *sql.DB, embedder Embedder) *Searcher {
 	return &Searcher{db: db, embedder: embedder}
 }
 
+// SearchSegments performs embedding search over segments.
+func (s *Searcher) SearchSegments(ctx context.Context, req SegmentSearchRequest) (SegmentSearchResponse, error) {
+	if s.db == nil {
+		return SegmentSearchResponse{}, errors.New("search: db is nil")
+	}
+	query := strings.TrimSpace(req.Query)
+	if query == "" {
+		return SegmentSearchResponse{}, errors.New("search: query is required")
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	minScore := req.MinScore
+	if minScore <= 0 {
+		minScore = defaultMinScore
+	}
+
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = "gemini-embedding-001"
+	}
+
+	useEmbeddings := req.UseEmbeddings
+	if !useEmbeddings {
+		useEmbeddings = true
+	}
+
+	queryEmbedding := req.QueryEmbedding
+	embeddingUsed := false
+	if useEmbeddings && len(queryEmbedding) == 0 {
+		if s.embedder == nil {
+			return SegmentSearchResponse{}, errors.New("search: embedder not configured")
+		}
+		embedding, err := s.embedder.Embed(query, model)
+		if err != nil || len(embedding) == 0 {
+			return SegmentSearchResponse{}, errors.New("search: failed to generate query embedding")
+		}
+		queryEmbedding = embedding
+	}
+	if useEmbeddings && len(queryEmbedding) > 0 {
+		embeddingUsed = true
+	}
+
+	querySQL := `
+		SELECT e.entity_id, e.embedding_blob, e.dimension,
+		       s.channel, s.thread_id, s.start_time, s.end_time, s.event_count,
+		       d.name, t.name
+		FROM embeddings e
+		JOIN segments s ON e.entity_id = s.id
+		LEFT JOIN segment_definitions d ON s.definition_id = d.id
+		LEFT JOIN threads t ON s.thread_id = t.id
+		WHERE e.entity_type = 'segment' AND e.model = ?
+	`
+	args := []any{model}
+	if req.Channel != "" {
+		querySQL += " AND s.channel = ?"
+		args = append(args, req.Channel)
+	}
+	if req.DefinitionName != "" {
+		querySQL += " AND d.name = ?"
+		args = append(args, req.DefinitionName)
+	}
+
+	rows, err := s.db.QueryContext(ctx, querySQL, args...)
+	if err != nil {
+		return SegmentSearchResponse{}, err
+	}
+	defer rows.Close()
+
+	results := make([]SegmentSearchResult, 0)
+	for rows.Next() {
+		var (
+			segmentID     string
+			blob          []byte
+			dimension     int
+			channel       sql.NullString
+			threadID      sql.NullString
+			startTime     int64
+			endTime       int64
+			eventCount    int
+			definitionName sql.NullString
+			threadName    sql.NullString
+		)
+		if err := rows.Scan(&segmentID, &blob, &dimension, &channel, &threadID, &startTime, &endTime, &eventCount, &definitionName, &threadName); err != nil {
+			continue
+		}
+		if len(queryEmbedding) == 0 || dimension != len(queryEmbedding) {
+			continue
+		}
+		embedding := blobToFloat64Slice(blob)
+		if len(embedding) != len(queryEmbedding) {
+			continue
+		}
+
+		score := normalizeCosine(cosineSimilarity(queryEmbedding, embedding))
+		if score < minScore {
+			continue
+		}
+
+		result := SegmentSearchResult{
+			SegmentID:      segmentID,
+			DefinitionName: definitionName.String,
+			Channel:        channel.String,
+			ThreadName:     threadName.String,
+			StartTime:      startTime,
+			EndTime:        endTime,
+			EventCount:     eventCount,
+			Score:          score,
+		}
+		if threadID.Valid {
+			result.ThreadID = threadID.String
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return SegmentSearchResponse{}, err
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
+	return SegmentSearchResponse{
+		Query:         query,
+		Model:         model,
+		EmbeddingUsed: embeddingUsed,
+		Results:       results,
+	}, nil
+}
+
 // SearchDocuments performs hybrid search over document_heads + events.
 func (s *Searcher) SearchDocuments(ctx context.Context, req DocumentSearchRequest) (DocumentSearchResponse, error) {
 	if s.db == nil {

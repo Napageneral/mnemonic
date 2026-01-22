@@ -1,416 +1,1500 @@
----
-summary: "Spec for memory extraction (AI sessions) with synthesis deferred"
-read_when:
-  - You are implementing memory extraction in comms
-  - You want to understand the memory hierarchy (workspace/user/agent)
-  - You need to build the synthesis pipeline
----
-# Memory System — Extraction Focus
+# Cortex Memory System Specification
 
-This spec defines how to extract **memory signals** from comms, primarily from AI
-session data (AIX). Synthesis is deferred. Memory itself is a narrative layer that
-we are not defining yet; for now we focus on reliable, parallel extraction.
-
-Related: LangSmith Agent Builder memory article (inspiration), semantic-agent-routing-spec.md (checkpoint system)
+**Status:** Draft - Pending Review  
+**Last Updated:** January 21, 2026  
+**Related:** `ARCHITECTURE_EVOLUTION.md`, `prompts/graphiti/README.md`
 
 ---
 
-## Goals (Now)
+## Overview
 
-- **High-quality extraction:** Capture raw memory signals from AI sessions (AIX).
-- **Parallelizable:** Extraction runs independently per chunk (fast + scalable).
-- **Temporal readiness:** Daily cross-channel chunks are available for later memory work.
-- **Semantic utility:** Extracted facets feed semantic context injection now.
-- **Attribution:** Every signal traces back to source events/conversations.
+This document specifies a **memory system** built onto Cortex that enables:
 
-## Non-goals (Now)
+1. **Entity extraction and resolution** — Identify and deduplicate people, places, things
+2. **Relationship extraction** — Capture facts as triples (subject → predicate → object)
+3. **Temporal tracking** — Bi-temporal model for when facts are true vs. when we learned them
+4. **Contradiction detection** — Invalidate stale facts when new information contradicts them
+5. **Graph-based querying** — Traverse relationships, not just search by similarity
 
-- Defining the final memory representation (narrative format is TBD)
-- Implementing synthesis/compaction logic (explicitly deferred)
-- Real-time memory updates during agent execution
-- Replacing person_facts (identity resolution is orthogonal)
+This system draws inspiration from [Graphiti](https://github.com/getzep/graphiti) while maintaining Cortex's more flexible architecture.
 
----
+### Known Gaps / Future Work
 
-## Definitions & Terminology
-
-- **extracted signal**: A facet derived from events (preferences, corrections, etc.)
-- **memory target**: Conceptual destination (workspace/user/agent) for future memory
-- **synthesis**: Future process that turns signals + context into narrative memory
-- **temporal chunk**: A daily conversation that aggregates events across channels
+| Gap | Description | Related Doc |
+|-----|-------------|-------------|
+| **Taxonomy Evolution** | Relationship types are free-form strings. Entity types need refinement over time. Need a generic solution for clustering/canonicalizing ontologies. | `docs/ideas/TAXONOMY_EVOLUTION.md` |
+| **Entity Summary Generation** | Auto-generate summaries from episodes + relationships. Lazy generation on query. | Deferred |
+| **Community Detection** | Cluster related entities for faster retrieval and organization. | Deferred |
 
 ---
 
-## Architecture Overview (Current)
+## Part 1: Naming Changes
 
-```
-Raw Events (comms DB)
-    ↓
-Conversation Chunking (existing)
-    ↓
-Extraction (analysis types)
-    ↓
-Facets (memory signal types)
+### Segments → Episodes
 
-Synthesis is deferred.
+**Decision:** Rename `segments` to `episodes` throughout Cortex.
+
+**Rationale:**
+- "Episode" captures temporal boundedness and narrative coherence
+- Maps to neuroscience concept of episodic memory (experiences) vs. semantic memory (facts)
+- Aligns with Graphiti terminology for interoperability
+
+**Schema changes:**
+```sql
+-- Rename tables
+ALTER TABLE segments RENAME TO episodes;
+ALTER TABLE segment_definitions RENAME TO episode_definitions;
+ALTER TABLE segment_events RENAME TO episode_events;
+
+-- Update foreign key columns
+ALTER TABLE analysis_runs RENAME COLUMN segment_id TO episode_id;
 ```
 
 ---
 
-## Current Extraction Focus (AIX)
+## Part 2: Architecture Comparison
 
-These prompts are **optimized for AI session data**. They extract:
+### Cortex vs. Graphiti Schema
 
-- **Agent memory signals** — corrections and task patterns from AI sessions
-- **User memory signals** — preferences, knowledge, and corrections expressed in AI chats
-- **Workspace signals** — conventions and gotchas when working on the workspace
+| Concept | Cortex (Current) | Graphiti | Notes |
+|---------|------------------|----------|-------|
+| Raw content | `events` table | `EpisodicNode` | Similar purpose |
+| Temporal grouping | `segments` (→ `episodes`) | Episodes are single messages | **Cortex is more flexible** |
+| Context window | Configurable via definitions | Hardcoded 8 previous | **Cortex is more flexible** |
+| Extracted facts | `facets` (key-value) | `EntityEdge` (triples) | Add triples to Cortex |
+| Entities | Not explicit | `EntityNode` | **Add to Cortex** |
+| Entity resolution | Not implemented | Inline during extraction | **Add to Cortex** |
+| Embeddings | `embeddings` table | On nodes/edges | Similar |
+| Temporal bounds | Not implemented | `valid_at`, `invalid_at` | **Add to Cortex** |
 
-The value right now is clean extraction of these signals from AIX sessions so the
-semantic context engine can retrieve them immediately.
+### Key Insight: Event → Episode Abstraction
 
----
+Graphiti ingests single messages and looks back 8 episodes for context. This is limiting.
 
-## Memory Targets (Future)
-
-These are conceptual targets for memory synthesis. Right now we only extract
-signals that will eventually feed these layers.
-
-### Level 1: Workspace Memory
-
-**Location:** `~/nexus/MEMORY.md`
-
-**Contains:**
-- How this nexus is configured
-- Tools and skills available
-- Project structures and conventions
-- Cross-cutting patterns ("all code uses TypeScript", "prefer trash over rm")
-
-**Source events:**
-- Agent sessions working on nexus itself
-- Configuration changes
-- Skill installations
-
-**Signals extracted from:** AI sessions and daily temporal chunks
-
-### Level 2: User Memory
-
-**Location:** `~/nexus/state/user/MEMORY.md`
-
-**Contains:**
-- Tyler's preferences (communication style, formatting, tooling)
-- Knowledge about Tyler (what he knows, what he cares about)
-- Relationships and context (who people are, how they relate)
-- Patterns from all communications (iMessage, Gmail, AI sessions)
-
-**Source events:**
-- All comms events where Tyler is a participant
-- AI sessions where Tyler provides feedback/corrections
-- Self-disclosures in messages
-
-**Signals extracted from:** AI sessions and daily temporal chunks
-
-### Level 3: Agent Memory
-
-**Location:** `~/nexus/state/agents/{name}/MEMORY.md`
-
-**Contains:**
-- Task-specific learnings for this agent
-- Corrections made during this agent's sessions
-- Patterns unique to this agent's domain
-
-**Source events:**
-- AI sessions tagged with this agent name (from aix session.name)
-- Explicit corrections in those sessions
-
-**Signals extracted from:** agent-tagged AI sessions (AIX)
-
----
-
-## Data Model
-
-Memory should use the **existing comms extraction stack** — no new tables.
-
-**Raw → Extracted only (for now):**
-- Raw events live in `events`
-- Chunking groups events into `conversations`
-- Analyses run on conversations (`analysis_types` / `analysis_runs`)
-- Extracted signals are stored as **facets** (`facets`) with memory-oriented facet types
-
-**Memory signal facet types** (stored in `facets.facet_type`):
-- `self_preference` — user preferences
-- `self_knowledge` — what the user knows/understands
-- `self_correction` — user corrections of AI behavior
-- `relationship_context` — relationships and social context
-- `workspace_convention` — workspace-level patterns
-
-**Temporal memory** is modeled by **daily conversations**:
-- Create a conversation definition that chunks by day across all channels
-- Run memory analysis types on those daily conversations
-- The resulting facets are time-windowed by `conversations.start_time`/`end_time`
-
-**Synthesis is deferred.** When we eventually add it, it can build on top of
-facets and analysis runs without introducing new tables.
-
----
-
-## Analysis Types for Memory Extraction
-
-### 1. self-preference-extraction-v1
-
-**Purpose:** Extract user preferences from conversations (formatting, communication style, tool preferences, etc.)
-
-**Input:** Conversation chunk with user as participant
-
-**Output facets:**
-- `self_preference` — "prefers bullet points", "hates corporate speak", etc.
-
-**Scope assignment:** Always `user` (preferences are user-level)
-
-### 2. correction-extraction-v1
-
-**Purpose:** Extract instances where user corrects AI behavior
-
-**Input:** AI session conversation (from aix adapter)
-
-**Output facets:**
-- `self_correction` — "when X, do Y instead", "don't do Z"
-
-**Scope assignment:**
-- If session has agent name → `agent` scope
-- Otherwise → `user` scope
-
-### 3. self-knowledge-extraction-v1
-
-**Purpose:** Extract what user knows, understands, or cares about
-
-**Input:** Conversation chunk with user as participant
-
-**Output facets:**
-- `self_knowledge` — "knows Go", "understands distributed systems", "cares about DX"
-
-**Scope assignment:** Always `user`
-
-### 4. relationship-context-extraction-v1
-
-**Purpose:** Extract context about relationships mentioned in conversations
-
-**Input:** Conversation chunk
-
-**Output facets:**
-- `relationship_context` — "Casey is girlfriend", "Dad owns Napa General Store"
-
-**Scope assignment:** Always `user`
-
-### 5. workspace-pattern-extraction-v1
-
-**Purpose:** Extract workspace-level conventions from AI sessions working on the workspace itself
-
-**Input:** AI session in nexus workspace
-
-**Output facets:**
-- `workspace_convention` — "uses AGENTS.md", "skills live in skills/"
-
-**Scope assignment:** Always `workspace`
-
----
-
-## Extraction Pipeline (Current)
-
-### Trigger: Heartbeat or Cron
-
-Extraction can run on heartbeat/cron, or manually via `comms compute enqueue/run`.
-
-### Pipeline Stages
-
+**Cortex's approach is superior:**
 ```
-1. CHUNK
-   - Daily conversation definition (strategy = daily, channel = NULL)
-   - AI session conversations (aix → threads)
-
-2. ANALYZE
-   - Run memory analysis types on daily conversations
-   - Run correction/workspace analysis on AI sessions
-
-3. STORE
-   - Write memory entries as facets in `facets`
-   - Use facet_type to indicate category (self_preference, relationship_context, etc.)
+Events (raw) → Episode Definitions (chunking rules) → Episodes (grouped)
+                                                          ↓
+                                                   Entity Extraction
+                                                   (over full episode)
 ```
 
-## Synthesis (Deferred)
-
-Sequential synthesis is **not implemented yet**. The prompt exists for future use:
-`prompts/memory-synthesis-v1.prompt.md`.
-
-When added later, it should read facets and produce compressed summaries, but it
-should not require new tables.
+Benefits:
+- **Tunable context**: Episode size determined by chunking strategy, not hardcoded
+- **Channel-appropriate**: Different strategies for different sources
+- **LLM-efficient**: Extract entities from coherent episode, not sliding window
 
 ---
 
-## Agent Name Attribution
+## Part 3: Data Model
 
-### From aix sessions
+### 3.1 Storage Strategy
 
-The aix adapter syncs sessions with a `name` field (e.g., "Cursor Session" or a custom name). This becomes the basis for agent attribution.
+**SQLite-only** — no graph database needed for current use case.
+
+**SQLite** stores everything:
+- Events (raw messages, documents)
+- Episodes (temporal groupings, equivalent to Graphiti's EpisodicNode)
+- Episode definitions (chunking strategies)
+- Facets (key-value extractions, including raw triple extractions)
+- Entities (People, Companies, Projects, etc. — generalizes Contacts/People)
+- Entity aliases (union-find for identity resolution)
+- Relationships (deduplicated triples with temporal bounds)
+- Embeddings (unified table for events, episodes, entities, relationships)
+- Mentions (episode↔entity, episode↔relationship links)
+- Merge candidates (suspected duplicates for review)
+
+**Why no graph database:**
+1. Multi-hop traversal queries are rare for personal memory (~1-10k entities)
+2. SQLite recursive CTEs handle the queries we need
+3. Single source of truth, no sync complexity
+4. Proven, embedded, battle-tested
+
+**If needed later:** Schema is designed to support Kuzu. Add only if we hit queries like shortest-path or community detection algorithms that SQLite can't handle efficiently.
+
+### 3.2 Entity Types
+
+**Philosophy: Everything meaningful is an entity.** No special-cased attributes. The graph captures all facts as relationships between entities.
+
+This enables powerful queries like:
+- "Who else likes hiking?" → traverse from Activity:Hiking
+- "What concepts has Claude explained to me?" → traverse from Agent:Claude
+- "What happened on my birthday?" → traverse from Date entity
+
+**Default types:**
+
+| ID | Name | Description | Examples |
+|----|------|-------------|----------|
+| 0 | Entity | Default/unknown type | Fallback |
+| 1 | Person | A human being | Tyler, Dad, Casey |
+| 2 | Agent | An AI assistant or bot | Claude, GPT-4, Codex |
+| 3 | Company | Business or organization | Anthropic, Google, Intent Systems |
+| 4 | Project | A project, product, or codebase | Cortex, Nexus, HTAA |
+| 5 | Location | A place | Austin, Texas, 1812 Dwyer Ave |
+| 6 | Date | A specific date or time point | 1990-05-15, 2024-01-21 |
+| 7 | Event | A meeting or occurrence | "Jan 21 standup", "HTAA meeting" |
+| 8 | Document | A file or written work | README.md, "the spec" |
+| 9 | Concept | An idea, topic, or notion | BiTemporalModel, Monads, Memory |
+| 10 | Technology | A tool, language, or framework | SQLite, Go, React |
+| 11 | Activity | A hobby, sport, or activity | Hiking, Chess, Coding |
+| 12 | Profession | A job role or career | SoftwareEngineer, Designer |
+| 13 | Pet | An animal companion | Luna, Max |
+
+**Stored in config or code:**
+
+```go
+var DefaultEntityTypes = []EntityType{
+    {ID: 0, Name: "Entity", Description: "Default/unknown type"},
+    {ID: 1, Name: "Person", Description: "A human being"},
+    {ID: 2, Name: "Agent", Description: "An AI assistant or bot"},
+    {ID: 3, Name: "Company", Description: "Business or organization"},
+    {ID: 4, Name: "Project", Description: "A project, product, or codebase"},
+    {ID: 5, Name: "Location", Description: "A place (city, address, venue)"},
+    {ID: 6, Name: "Date", Description: "A specific date or time point"},
+    {ID: 7, Name: "Event", Description: "A meeting, occurrence, or happening"},
+    {ID: 8, Name: "Document", Description: "A file, article, or written work"},
+    {ID: 9, Name: "Concept", Description: "An idea, topic, or abstract notion"},
+    {ID: 10, Name: "Technology", Description: "A tool, language, or framework"},
+    {ID: 11, Name: "Activity", Description: "A hobby, sport, or activity"},
+    {ID: 12, Name: "Profession", Description: "A job role or career"},
+    {ID: 13, Name: "Pet", Description: "An animal companion"},
+}
+```
+
+**Resolution strategies by type:**
+
+| Entity Type | Resolution Strategy |
+|-------------|---------------------|
+| Person, Agent | Aliases + context scoring + LLM |
+| Company, Project | Name similarity + aliases |
+| Location | Name + normalization (geocoding optional) |
+| Date | Exact match (normalize format first) |
+| Concept, Technology | Embedding similarity + LLM |
+| Activity, Profession | Embedding similarity + ontology clustering |
+| Event | Name + date + participants |
+| Document | Path/name + content hash |
+
+**Extensible:** Add custom types for specific domains (e.g., `Capability`, `Repository`, `Meeting`).
+
+**Taxonomy evolution:** Types cluster and refine over time. See `docs/ideas/TAXONOMY_EVOLUTION.md`.
+
+### 3.3 Relationship Types
+
+Relationships are **free-form strings** (taxonomy evolution will cluster them later).
+
+**Common relationship types:**
+
+| Category | Relationship Types |
+|----------|-------------------|
+| **Identity** | HAS_EMAIL, HAS_PHONE, HAS_HANDLE, ALSO_KNOWN_AS |
+| **Personal** | IS_A, LIKES, DISLIKES, PREFERS, BORN_ON, BORN_IN, HAS_DIET |
+| **Professional** | WORKS_AT, OWNS, FOUNDED, ATTENDED, HAS_ROLE |
+| **Social** | KNOWS, FRIEND_OF, SPOUSE_OF, PARENT_OF, CHILD_OF, SIBLING_OF, COLLEAGUE_OF |
+| **Temporal** | OCCURRED_ON, SCHEDULED_FOR, STARTED_ON, ENDED_ON, VALID_FROM, VALID_UNTIL |
+| **Projects** | USES, DEPENDS_ON, CREATED, CONTRIBUTED_TO, MAINTAINS |
+| **AI Conversations** | EXPLAINED, SUGGESTED, ASKED_ABOUT, AGREED_WITH, DISAGREED_WITH, DISCUSSED, IMPLEMENTED, COMPARED, RECOMMENDED |
+| **Location** | LIVES_IN, LOCATED_IN, VISITED, TRAVELED_TO |
+| **Content** | MENTIONED_IN, REFERENCES, CONTAINS, AUTHORED |
+
+**All relationships have:**
+- `relation_type`: The type (free-form string, SCREAMING_SNAKE_CASE)
+- `fact`: Natural language description ("Tyler works at Anthropic")
+- `valid_at` / `invalid_at`: Bi-temporal bounds
+- `source_episode_id`: Which episode extracted this (via mentions table)
+
+### 3.4 SQLite Schema Additions
 
 ```sql
--- In aix adapter, session name is stored in threads table
-SELECT name FROM threads WHERE source_adapter = 'cursor' AND id = ?
+-- ============================================
+-- ENTITIES (canonical, deduplicated)
+-- ============================================
+-- This generalizes People/Contacts to all entity types.
+-- A "Person" entity is just an entity with entity_type='Person'.
+CREATE TABLE entities (
+    id TEXT PRIMARY KEY,
+    canonical_name TEXT NOT NULL,
+    entity_type TEXT NOT NULL,  -- Person, Company, Project, Location, Concept, etc.
+    
+    -- No attributes column - everything is relationships to other entities!
+    -- "Tyler's birthday" = (Tyler) --BORN_ON--> (Date:1990-05-15)
+    -- "Tyler likes hiking" = (Tyler) --LIKES--> (Activity:Hiking)
+    
+    summary TEXT,               -- Auto-generated from relationships + episodes
+    summary_updated_at TEXT,    -- When summary was last regenerated
+    
+    -- How this entity was created
+    origin TEXT NOT NULL,       -- 'contact_import', 'extracted', 'manual'
+    confidence REAL DEFAULT 1.0,
+    
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_entities_type ON entities(entity_type);
+CREATE INDEX idx_entities_name ON entities(canonical_name);
+
+-- ============================================
+-- ENTITY ALIASES (identity resolution)
+-- ============================================
+-- Stores identity markers: email, phone, handles, name variants.
+-- ALIASES CAN BE SHARED: family phone, team email can map to multiple entities.
+-- When resolving, shared aliases require disambiguation.
+-- When merging entities, reassign loser's aliases to winner.
+CREATE TABLE entity_aliases (
+    id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL REFERENCES entities(id),
+    alias TEXT NOT NULL,
+    alias_type TEXT NOT NULL,  -- 'name', 'email', 'phone', 'handle', 'nickname'
+    normalized TEXT,           -- Lowercase/cleaned for matching
+    is_shared BOOLEAN DEFAULT FALSE,  -- TRUE if multiple entities share this alias
+    created_at TEXT NOT NULL
+    -- NOTE: No UNIQUE constraint - same alias can map to multiple entities
+);
+
+CREATE INDEX idx_entity_aliases_lookup ON entity_aliases(alias, alias_type);
+CREATE INDEX idx_entity_aliases_normalized ON entity_aliases(normalized, alias_type);
+CREATE INDEX idx_entity_aliases_entity ON entity_aliases(entity_id);
+
+-- ============================================
+-- RELATIONSHIPS (deduplicated triples with temporal bounds)
+-- ============================================
+CREATE TABLE relationships (
+    id TEXT PRIMARY KEY,
+    source_entity_id TEXT NOT NULL REFERENCES entities(id),
+    target_entity_id TEXT NOT NULL REFERENCES entities(id),
+    relation_type TEXT NOT NULL,  -- WORKS_AT, KNOWS, CREATED, LIVES_WITH, etc.
+    fact TEXT NOT NULL,           -- Natural language: "Tyler works at Intent Systems"
+    
+    -- Bi-temporal tracking
+    valid_at TEXT,      -- When relationship became true in reality
+    invalid_at TEXT,    -- When relationship stopped being true in reality
+    created_at TEXT NOT NULL,  -- When system first learned about it
+    expired_at TEXT,    -- When system marked it as superseded (by contradiction detection)
+    
+    -- Metadata
+    confidence REAL DEFAULT 1.0,
+    
+    UNIQUE(source_entity_id, target_entity_id, relation_type, valid_at)
+);
+
+CREATE INDEX idx_relationships_source ON relationships(source_entity_id);
+CREATE INDEX idx_relationships_target ON relationships(target_entity_id);
+CREATE INDEX idx_relationships_type ON relationships(relation_type);
+CREATE INDEX idx_relationships_temporal ON relationships(valid_at, invalid_at, expired_at);
+
+-- ============================================
+-- EPISODE-ENTITY MENTIONS (which episodes mention which entities)
+-- ============================================
+-- Junction table: many-to-many between episodes and entities.
+-- Used for: entity summary generation, recency queries, channel derivation.
+-- "Which channels does Tyler appear in?" = query episodes via this table.
+CREATE TABLE episode_entity_mentions (
+    episode_id TEXT NOT NULL REFERENCES episodes(id),
+    entity_id TEXT NOT NULL REFERENCES entities(id),
+    mention_count INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (episode_id, entity_id)
+);
+
+CREATE INDEX idx_episode_entity_mentions_entity ON episode_entity_mentions(entity_id);
+
+-- ============================================
+-- EPISODE-RELATIONSHIP MENTIONS (which episodes support which relationships)
+-- ============================================
+-- Junction table: many-to-many between episodes and relationships.
+-- Same relationship mentioned in 10 episodes = 10 records here.
+-- Used for: frequency signals, provenance, confidence boosting.
+CREATE TABLE episode_relationship_mentions (
+    id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL REFERENCES episodes(id),
+    relationship_id TEXT NOT NULL REFERENCES relationships(id),
+    extracted_fact TEXT NOT NULL,  -- Original extracted text (raw, pre-dedup)
+    confidence REAL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_episode_rel_mentions_episode ON episode_relationship_mentions(episode_id);
+CREATE INDEX idx_episode_rel_mentions_relationship ON episode_relationship_mentions(relationship_id);
+
+-- ============================================
+-- MERGE CANDIDATES (suspected duplicates for review)
+-- ============================================
+-- When resolution is uncertain, create a merge candidate for human review.
+-- Better to have duplicates than false-merge corruption.
+CREATE TABLE merge_candidates (
+    id TEXT PRIMARY KEY,
+    entity_a_id TEXT NOT NULL REFERENCES entities(id),
+    entity_b_id TEXT NOT NULL REFERENCES entities(id),
+    confidence REAL,
+    reason TEXT,  -- 'name_similarity', 'relationship_overlap', 'co_mention', etc.
+    context TEXT, -- JSON with supporting evidence
+    status TEXT DEFAULT 'pending',  -- 'pending', 'merged', 'rejected'
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+
+CREATE INDEX idx_merge_candidates_status ON merge_candidates(status);
+
+-- ============================================
+-- EMBEDDINGS (unified for all embeddable types)
+-- ============================================
+-- Extend existing embeddings table rather than separate tables per type.
+-- target_type + target_id identify what was embedded.
+ALTER TABLE embeddings ADD COLUMN target_type TEXT;  -- 'event', 'episode', 'entity', 'relationship'
+ALTER TABLE embeddings ADD COLUMN target_id TEXT;
+
+-- For new installs, the full schema would be:
+-- CREATE TABLE embeddings (
+--     id TEXT PRIMARY KEY,
+--     target_type TEXT NOT NULL,  -- 'event', 'episode', 'entity', 'relationship'
+--     target_id TEXT NOT NULL,
+--     embedding BLOB NOT NULL,
+--     model TEXT NOT NULL,
+--     created_at TEXT NOT NULL,
+--     UNIQUE(target_type, target_id, model)
+-- );
+
+CREATE INDEX idx_embeddings_target ON embeddings(target_type, target_id);
 ```
 
-### Mapping to agent scope
+### 3.5 Graph Schema (Kuzu) — Deferred
 
-When extracting memory from an AI session:
+If SQLite graph queries prove insufficient, add Kuzu with this schema:
 
-1. Get thread name from aix
-2. Use that thread name to select agent-specific sessions for analysis
-3. Persist agent attribution in analysis metadata (future) if needed
+```
+Node Types:
+- Episode (uuid, name, valid_at, created_at)  -- content stays in SQLite
+- Entity (uuid, name, type, summary, created_at)
+- Community (uuid, name, summary, created_at)
 
-### Explicit tagging
-
-Users can tag sessions with agent names via:
-- Session title in Cursor
-- Future: `nexus session tag <session_id> --agent <name>`
-
----
-
-## MEMORY.md Format (Illustrative, Future)
-
-These examples are placeholders to communicate intent. The actual memory format
-will be defined when synthesis is designed.
-
-### Structure
-
-```markdown
-# Memory
-
-Last updated: 2026-01-20T15:30:00Z
-
-## Preferences
-
-- Prefers bullet points over paragraphs
-- Hates corporate speak and HR-style language
-- Wants direct feedback, real criticism, pushback when wrong
-
-## Knowledge
-
-- Proficient in Go, TypeScript, Python
-- Building Nexus — AI workspace/OS for personal productivity
-- Understands distributed systems, embeddings, LLM orchestration
-
-## Patterns
-
-- When making changes, always check for linter errors after
-- Use `trash` instead of `rm` for recoverable deletes
-
-## Relationships
-
-- **Casey Adams** — girlfriend, they live together
-- **Dad (Jim Brandt)** — owns Napa General Store
-
-## Context
-
-- Lives in Austin, TX (Central timezone)
-- Works on Nexus full-time
+Edge Types:
+- MENTIONS (Episode → Entity)
+- RELATES_TO (Entity → Entity) with properties:
+  - relation_type, fact, valid_at, invalid_at, created_at, expired_at
+- HAS_MEMBER (Community → Entity)
 ```
 
-### Agent-specific additions
+**When to add Kuzu:**
+- Multi-hop traversal queries are too slow (e.g., "friends of friends")
+- Recursive CTEs become unwieldy
+- Graph algorithms needed (PageRank, community detection)
 
-Agent MEMORY.md files include task-specific learnings:
+### 3.6 Keeping Both Facets AND Relationships
 
-```markdown
-# Memory — email-assistant
+**Decision:** Maintain both extraction types in parallel.
 
-Last updated: 2026-01-20T15:30:00Z
+| Extraction Type | Use Case | Example |
+|-----------------|----------|---------|
+| **Facets** (key-value) | Simple attributes, metadata, raw extractions | `{key: "sentiment", value: "positive"}` |
+| **Relationships** (triples) | Entity connections (deduplicated) | `Tyler --WORKS_AT--> Intent Systems` |
 
-## Task Patterns
+**How they work together:**
 
-- Always check unread count before summarizing
-- Group emails by sender for recurring correspondents
-- Flag anything from Casey as high priority
+```
+1. Extract raw triple from episode
+   "Tyler works at Intent Systems"
+   
+2. Store as facet (raw, preserves provenance)
+   Facet: {
+     analysis_type: "relationship_extraction",
+     key: "triple",
+     value: "Tyler WORKS_AT Intent Systems",
+     episode_id: "ep_123"
+   }
+   
+3. Resolve entities (Tyler → entity_abc, Intent Systems → entity_xyz)
 
-## Corrections
+4. Dedupe against existing relationships
 
-- Don't draft replies to cold outreach — just archive
-- Use casual tone for personal emails, formal for work
+5. Store in relationships table (canonical, deduplicated)
+   Relationship: {
+     source_entity_id: "entity_abc",
+     target_entity_id: "entity_xyz", 
+     relation_type: "WORKS_AT",
+     fact: "Tyler Brandt works at Intent Systems"
+   }
 
-## Domain Knowledge
+6. Link back: episode_relationship_mentions
+   Links ep_123 → this relationship
+```
 
-- Tyler's work email: tnapathy@gmail.com
-- Important senders: Casey, Dad, specific work contacts
+**Why both?**
+- Facets preserve raw extractions (useful for taxonomy evolution, debugging)
+- Relationships are deduplicated for querying
+- Facets are cheap/fast, relationships require resolution
+- Can analyze extraction quality by comparing facets vs relationships
+
+---
+
+## Part 4: Extraction Pipeline
+
+### 4.0 Key Insight: Resolution-Time Context (Not Extraction-Time)
+
+**Problem:** Existing knowledge should influence how entities are interpreted.
+
+**Example:** When processing "Tyler mentioned the project is delayed":
+- Multiple Tylers exist in the graph
+- "the project" could refer to several projects
+- We need context to disambiguate
+
+**Rejected approach: Retrieval-augmented extraction**
+```
+Episode → Retrieve context → Inject into prompt → Extract
+```
+Problems:
+- Makes extraction sequential (can't parallelize)
+- Bad graph data corrupts extraction
+- Non-deterministic (same input → different output depending on graph state)
+
+**Chosen approach: Resolution-time context**
+```
+Episode → Extract (stateless) → Resolve with graph context
+```
+
+Extraction is stateless and parallelizable. Resolution uses the graph to disambiguate:
+
+```
+1. EXTRACT (context-free)
+   Input: "Tyler mentioned the project is delayed"
+   Output: entities=["Tyler", "the project"], relationships=[("Tyler", "MENTIONED", "the project")]
+
+2. RESOLVE "Tyler" (with graph context)
+   - Search entity_aliases for "Tyler" → multiple candidates
+   - Context signals:
+     - Episode channel: work Slack → weight work-Tyler higher
+     - Recent mentions: Tyler Brandt mentioned 3 episodes ago → weight higher
+     - Co-mentions: "the project" + Tyler Brandt has PROJECT relationships
+   - Score candidates, pick highest (or create new if uncertain)
+   - Track top N candidates considered (for debugging/review)
+
+3. RESOLVE "the project" (with graph context)
+   - What projects does resolved-Tyler connect to?
+   - Recent context suggests Cortex project
+   - If confident → resolve to "Cortex"
+   - If ambiguous → create generic entity, flag for review
+```
+
+**Benefits:**
+- Extraction is stateless, parallelizable, reproducible
+- Resolution uses graph context where it matters
+- Bad graph data doesn't corrupt extraction
+- Can re-run resolution if graph improves
+
+**Episode lookback — configurable per episode_definition:**
+- `lookback_episodes: 0` — Default (our episodes are already rich context)
+- `lookback_episodes: 1-2` — For coreference-heavy contexts
+- Configurable in extraction prompt template
+
+### 4.1 Pipeline Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      MEMORY EXTRACTION PIPELINE                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  INPUT: Episode (grouped events from any chunking strategy)             │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 1. EXTRACT ENTITIES (stateless, parallelizable)                  │   │
+│  │    Prompt: extract-entities-{message|text}.prompt.md             │   │
+│  │    Input: episode content + optional previous episodes           │   │
+│  │    Output: [{name, entity_type_id}, ...]                         │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 2. REFLEXION - ENTITIES (optional)                               │   │
+│  │    Prompt: reflexion-entities.prompt.md                          │   │
+│  │    Purpose: Self-check for missed entities                       │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 3. RESOLVE ENTITIES (with graph context)                         │   │
+│  │    - Exact alias match (high confidence)                         │   │
+│  │    - Embed + search existing entities                            │   │
+│  │    - Context scoring (channel, co-mentions, relationships)       │   │
+│  │    - Track top N candidates considered (for debugging)           │   │
+│  │    - LLM disambiguation only if scores are close                 │   │
+│  │    - CRITICAL: Create new if uncertain (duplicates > false merge)│   │
+│  │    Output: resolved_entities[], uuid_map{}, candidates_considered│   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 4. EXTRACT RELATIONSHIPS                                         │   │
+│  │    Prompt: extract-relationships.prompt.md                       │   │
+│  │    Input: episode + resolved entities + relevant_context         │   │
+│  │    Output: [{source_id, target_id, relation_type, fact,          │   │
+│  │              valid_at, invalid_at}, ...]                         │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 5. CLASSIFY UTTERANCE (optional, for better extraction)          │   │
+│  │    Determine: sincere / sarcastic / hypothetical / uncertain     │   │
+│  │    Affects: whether to extract, confidence level                 │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 6. EXTRACT TEMPORAL BOUNDS                                       │   │
+│  │    Prompt: extract-dates.prompt.md                               │   │
+│  │    Refine: valid_at, invalid_at for each relationship            │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 7. REFLEXION - RELATIONSHIPS (optional)                          │   │
+│  │    Prompt: reflexion-relationships.prompt.md                     │   │
+│  │    Purpose: Self-check for missed facts                          │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 8. RESOLVE EDGES                                                 │   │
+│  │    - Search existing edges between same entity pairs             │   │
+│  │    - Prompt: resolve-edges.prompt.md                             │   │
+│  │    - Decision: merge with existing OR create new                 │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 9. DETECT CONTRADICTIONS                                         │   │
+│  │    Prompt: detect-contradictions.prompt.md                       │   │
+│  │    Find: existing facts contradicted by new facts                │   │
+│  │    Action: set invalid_at on contradicted edges                  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 10. GENERATE EMBEDDINGS                                          │   │
+│  │     - Embed new entity names                                     │   │
+│  │     - Embed new relationship facts                               │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 11. SAVE                                                         │   │
+│  │     SQLite: entities, relationships, mentions, embeddings        │   │
+│  │     Kuzu: EntityNodes, EntityEdges, EpisodeNodes, MENTIONS       │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 12. UPDATE ENTITY SUMMARIES (optional)                           │   │
+│  │     Prompt: summarize-entity.prompt.md                           │   │
+│  │     Update summaries for entities mentioned in this episode      │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  PARALLEL: Extract facets using existing Cortex pipeline               │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 4.2 Entity Resolution Details
+
+**The Problem:** Same entity appears with different names:
+- "Tyler" / "Tyler Brandt" / "tnapathy@gmail.com"
+- "Intent Systems" / "Intent" / "the company"
+
+**The Harder Problem:** Multiple people with same name:
+- Tyler Brandt (you), Tyler from college, Tyler at the coffee shop
+- Must avoid false-positive merges — duplicates can be fixed, false merges corrupt data
+
+**Resolution Strategy:**
+
+```
+1. EXACT ALIAS MATCH
+   Search entity_aliases table for exact match (normalized)
+   Email/phone matches are high confidence → use existing entity
+   Name-only matches require further validation
+
+2. SEMANTIC SIMILARITY
+   Embed extracted name
+   Search entity embeddings by cosine similarity
+   Candidates = top K above threshold (0.85+)
+
+3. CONTEXT SCORING (for each candidate)
+   Score based on disambiguation signals:
+   
+   +high:  Identifier match (email, phone, handle)
+   +high:  Co-mentioned with related entities we know
+           "Tyler and Casey" + we know Casey→Tyler Brandt
+   +med:   Same channel as recent mentions of candidate
+   +med:   Relationship context fits (works at same company)
+   +low:   Name similarity only
+   
+   -score: Different channel, no overlap signals
+   -score: Conflicting attributes (different phone number)
+
+4. DECISION LOGIC
+   If single candidate with high score (>0.9) → match
+   If multiple candidates, clear winner (gap >0.3) → match winner
+   If ambiguous (scores close) → LLM disambiguation
+   If LLM uncertain → create NEW entity, add to merge_candidates
+   If no candidates → create new entity
+
+5. CRITICAL RULE
+   When in doubt, create new entity.
+   Duplicates are recoverable. False merges corrupt data.
+   Surface uncertain cases in merge_candidates for human review.
+```
+
+**Cross-platform contact deduplication:**
+
+Gmail contact "Casey Adams <casey@example.com>" and iMessage "Casey 💕" may be same person.
+
+```
+Detection strategies:
+1. Identifier overlap: If any identifier matches → high-confidence merge
+2. Relationship inference: Both contacts message same third parties → likely same
+3. Name + relationship: Same name + similar relationship graph → candidate
+4. Surface for review: Add to merge_candidates with evidence
+```
+
+### 4.3 Contacts Integration
+
+**Contacts are pre-seeded entities** with high confidence. This generalizes People/Contacts into the entity system.
+
+```
+Import flow:
+1. Load contacts from address book / CRM / iMessage / Gmail
+2. For each contact:
+   - Check if entity with matching identifier exists
+   - If yes: add new aliases to existing entity
+   - If no: create new entity (origin='contact_import')
+3. Add aliases: email, phone, handle, nickname
+4. Set confidence=1.0 (user-verified data)
+
+Resolution flow:
+1. When extracting "Tyler" from message
+2. First check entity_aliases for exact match
+3. Contact-imported entities get priority (confidence=1.0)
+4. Unknown people become new entities (origin='extracted')
+```
+
+**Cross-platform merging:**
+
+```
+Scenario: Import Gmail contacts, then iMessage contacts
+
+Gmail import creates:  Entity "Casey Adams" with alias "casey@example.com"
+iMessage import finds: Contact "Casey" with phone "+1-555-1234"
+
+If no identifier overlap:
+  - Create merge_candidate with reason='name_similarity'
+  - Surface for human review
+  
+If identifier overlap (same phone in both):
+  - Auto-merge, combine aliases
+```
+
+### 4.4 Identity Promotion: Relationships → Aliases
+
+**Key insight:** Extraction produces relationships. A separate pass promotes some relationships to aliases.
+
+**Why this two-step approach:**
+- Extraction is stateless (just extracts what it sees)
+- Identity promotion is a policy decision (what counts as an identifier?)
+- Handles shared identifiers (family phone, team email) gracefully
+- Aliases drive collision detection; relationships are supplementary
+
+**The flow:**
+
+```
+1. EXTRACTION (stateless)
+   Message: "my recovery email is jim@napageneralstore.com"
+   From: Dad (+1-650-823-8440)
+   
+   Extracted: 
+     Entities: ["Dad"]
+     Relationships: [
+       {source: "Dad", type: "HAS_EMAIL", target: "jim@napageneralstore.com",
+        source_type: "self_disclosed", evidence: "my recovery email is..."}
+     ]
+
+2. RESOLUTION
+   "Dad" → resolves to existing Dad entity (via channel participant matching)
+   Relationship stored with resolved entity IDs
+
+3. IDENTITY PROMOTION (post-processing pass)
+   For relationships with type in PROMOTABLE_TYPES:
+     If source_type = 'self_disclosed' AND confidence >= 0.8:
+       If target is not shared (only one HAS_* relationship to it):
+         Add relationship.target as alias on source entity
+         
+   Result: Dad entity gains alias "jim@napageneralstore.com"
+
+4. COLLISION DETECTION (runs on aliases)
+   Check: Does any other entity have alias "jim@napageneralstore.com"?
+   If yes → create merge_candidate
+```
+
+**What promotes to alias vs stays as relationship:**
+
+| Relationship Type | Promotes to Alias? | Notes |
+|-------------------|-------------------|-------|
+| HAS_EMAIL | Yes | Unique identifier |
+| HAS_PHONE | Yes | Unique identifier |
+| HAS_HANDLE | Yes | Twitter, Instagram, etc. |
+| HAS_USERNAME | Yes | Platform-specific |
+| HAS_NAME / ALSO_KNOWN_AS | Yes | Name variants, nicknames |
+| WORKS_AT | No | Relationship to Company entity |
+| LIVES_IN | No | Relationship to Location entity |
+| HAS_SPOUSE | No | Relationship to Person entity |
+| OWNS | No | Relationship to Company entity |
+
+**Shared identifier handling:**
+
+```
+Scenario: Family phone number shared by multiple people
+
+Message from Dad: "our home number is 555-1234"
+Message from Mom: "you can reach us at 555-1234"
+
+Both create relationships:
+  (Dad, HAS_PHONE, "555-1234")
+  (Mom, HAS_PHONE, "555-1234")
+
+Identity promotion:
+  Both entities get the alias added
+  BUT: alias.is_shared = TRUE (detected because multiple HAS_PHONE relationships exist)
+  
+Result:
+  entity_aliases: 
+    - (Dad, "555-1234", type='phone', is_shared=TRUE)
+    - (Mom, "555-1234", type='phone', is_shared=TRUE)
+
+Resolution behavior:
+  When searching for "555-1234": returns BOTH Dad and Mom
+  Collision detection: Shared aliases don't trigger merge candidates
+  Disambiguation: Requires additional context (channel, co-mentions)
+```
+
+### 4.5 person_facts Migration
+
+**Current system:** `person_facts` table with category/fact_type/fact_value structure.
+
+**Goal:** Unify into entity memory system. **Everything becomes entities + relationships.**
+
+**Philosophy:** No attributes. If it's worth storing, it's worth making queryable via the graph.
+
+**New system mapping:**
+
+| Current (person_facts) | New System | Example |
+|------------------------|------------|---------|
+| **Identity (→ Aliases)** | | |
+| email_* | `entity_aliases` | type='email' |
+| phone_* | `entity_aliases` | type='phone' |
+| social_* | `entity_aliases` | type='handle' |
+| full_legal_name | `entity_aliases` + `canonical_name` | type='name' |
+| nickname | `entity_aliases` | type='nickname' |
+| **Dates (→ Date Entities)** | | |
+| birthdate | `relationship` | (Person) --BORN_ON--> (Date:1990-05-15) |
+| anniversary | `relationship` | (Person) --ANNIVERSARY_ON--> (Date) |
+| **Professions (→ Profession Entities)** | | |
+| profession | `relationship` | (Person) --IS_A--> (Profession:SoftwareEngineer) |
+| **Activities (→ Activity Entities)** | | |
+| hobbies | `relationship` | (Person) --LIKES--> (Activity:Hiking) |
+| dietary_preferences | `relationship` | (Person) --HAS_DIET--> (Concept:Vegetarian) |
+| **Organizations (→ Company Entities)** | | |
+| employer_current | `relationship` | (Person) --WORKS_AT--> (Company:Anthropic) |
+| business_owned | `relationship` | (Person) --OWNS--> (Company) |
+| school_attended | `relationship` | (Person) --ATTENDED--> (Company:Stanford) |
+| **People (→ Person Entities)** | | |
+| spouse | `relationship` | (Person) --SPOUSE_OF--> (Person) |
+| children | `relationship` | (Person) --PARENT_OF--> (Person) |
+| **Places (→ Location Entities)** | | |
+| location_current | `relationship` | (Person) --LIVES_IN--> (Location:Austin) |
+| place_of_birth | `relationship` | (Person) --BORN_IN--> (Location) |
+| **Evidence / Context** | | |
+| evidence | `relationship.fact` | Natural language: "Dad said his email is..." |
+| source_type | `episode_relationship_mentions` | Links to source episode |
+| confidence | `relationship.confidence` | 0.0-1.0 |
+
+**Queryable examples:**
+
+```sql
+-- Who was born in 1990?
+SELECT e.canonical_name 
+FROM entities e
+JOIN relationships r ON e.id = r.source_entity_id
+JOIN entities d ON r.target_entity_id = d.id
+WHERE r.relation_type = 'BORN_ON' AND d.canonical_name LIKE '1990%';
+
+-- Who likes hiking?
+SELECT e.canonical_name
+FROM entities e
+JOIN relationships r ON e.id = r.source_entity_id
+JOIN entities a ON r.target_entity_id = a.id
+WHERE r.relation_type = 'LIKES' AND a.canonical_name = 'Hiking';
+
+-- What do Tyler and Ricky have in common?
+SELECT DISTINCT t.canonical_name as shared_interest
+FROM relationships r1
+JOIN relationships r2 ON r1.target_entity_id = r2.target_entity_id
+JOIN entities t ON r1.target_entity_id = t.id
+WHERE r1.source_entity_id = :tyler_id 
+  AND r2.source_entity_id = :ricky_id
+  AND r1.relation_type = r2.relation_type;
+```
+
+**Migration strategy:**
+1. Import existing person_facts:
+   - Identity fields → entity_aliases
+   - All other facts → create target entities + relationships
+2. Entity resolution deduplicates target entities
+3. Keep person_facts table during transition
+4. Deprecate after validation
+
+### 4.6 Entity Summary Generation
+
+**What:** Auto-generated summary of an entity from its episodes and relationships.
+
+**When to generate/update:**
+- Lazy: On query, if `summary_updated_at` < latest episode mention
+- Eager: After processing episode that mentions entity (batched)
+- Recommended: Lazy with cache invalidation
+
+**How:**
+
+```
+1. Get recent episodes mentioning entity (via episode_entity_mentions)
+   - Limit to most recent N or past M days
+   
+2. Get relationships involving entity
+   - Both directions (source and target)
+   - Include temporal validity
+   
+3. Generate summary via LLM
+   Prompt: summarize-entity.prompt.md
+   Input: entity name, type, episode snippets, relationships
+   Output: 2-3 sentence summary
+   
+4. Update entity.summary, entity.summary_updated_at
+```
+
+**Example:**
+
+```
+Entity: Casey Adams (Person)
+Episodes: [500 mentions across iMessage, email]
+Relationships:
+  - LIVES_WITH Tyler (valid_at: 2024-02-01)
+  - WORKS_AT Acme Corp (valid_at: 2023-06-15, invalid_at: 2025-01-01)
+  - WORKS_AT NewJob Inc (valid_at: 2025-01-15)
+
+Summary: "Casey Adams is Tyler's partner. They've lived together since 
+February 2024. Casey recently started working at NewJob Inc after 
+leaving Acme Corp."
+```
+
+### 4.5 Utterance Classification (Sarcasm, Hedging, Hypotheticals)
+
+**Before extraction, classify the utterance:**
+
+| Classification | Extraction Behavior |
+|----------------|---------------------|
+| **Sincere** | Extract normally |
+| **Sarcastic** | Extract opposite meaning, or skip |
+| **Hypothetical** | Don't extract as fact |
+| **Uncertain** | Extract with low confidence |
+| **Question** | Don't extract as fact (it's a query) |
+
+**Prompt pattern:**
+```
+Given this text, classify the utterance:
+- sincere: Stated as fact
+- sarcastic: Opposite of literal meaning
+- hypothetical: "If...", "Would be...", speculation
+- uncertain: "Maybe...", "I think...", hedging
+- question: Asking for information
+
+Text: "Oh great, another meeting about meetings"
+Classification: sarcastic
 ```
 
 ---
 
-## Conflict Resolution
+## Part 5: Chunking Strategies
 
-### Recency wins (future synthesis)
+### 5.1 Generic Strategy Interface
 
-When synthesis is added, contradictions should be resolved by preferring newer
-facets over older ones. Until then, contradictory facets will coexist in raw
-extraction output.
+**Decision:** Chunking strategies should be generic, not channel-specific.
 
-### Future: Confidence scoring
+```go
+type ChunkingStrategy interface {
+    Name() string
+    Chunk(events []Event) []Episode
+}
 
-Track confidence per memory entry based on:
-- Frequency (mentioned multiple times)
-- Recency (recent > old)
-- Explicitness (direct statement > inference)
+// Implementations (generic names)
+type TimeGapStrategy struct {
+    GapThreshold time.Duration  // e.g., 5 minutes
+}
+
+type TurnPairStrategy struct {
+    // Groups user message + assistant response
+}
+
+type FixedWindowStrategy struct {
+    WindowSize time.Duration  // e.g., 1 hour, 1 day
+}
+
+type TokenLimitStrategy struct {
+    MaxTokens int  // e.g., 4000 tokens
+}
+
+type SemanticStrategy struct {
+    SimilarityThreshold float64  // Split when topic changes
+}
+
+type SingleEventStrategy struct {
+    // Each event is its own episode (for rich metadata)
+}
+```
+
+### 5.2 Channel-Strategy Recommendations
+
+| Channel | Recommended Strategy | Rationale |
+|---------|---------------------|-----------|
+| iMessage | TimeGap (5min) | Conversation breaks |
+| Email | Per-thread or SingleEvent | Threads are natural units |
+| AI Sessions | TurnPair | User intent + response |
+| AI Sessions (metadata) | SingleEvent | Preserve rich metadata |
+| Documents | Semantic or TokenLimit | Topic coherence |
+| Calendar | SingleEvent | Each event is atomic |
+
+### 5.3 Semantic Chunking
+
+**How it works:**
+
+```
+1. Split text into sentences
+2. Embed each sentence
+3. Compute similarity between adjacent sentences
+4. Split where similarity drops below threshold
+
+Example:
+Sentences: [S1, S2, S3, S4, S5]
+Similarities: [0.9, 0.85, 0.3, 0.88]
+                          ↑
+                    Split here (topic change)
+
+Result: [Episode(S1,S2,S3), Episode(S4,S5)]
+```
+
+**Implementation options:**
+- Embedding-based (fast, works well)
+- LLM-based (more accurate, slower)
 
 ---
 
-## Implementation Phases
+## Part 6: Query Capabilities
 
-### Phase 1 — Analysis Types + Chunking
+### 6.1 Query Types
 
-- [ ] Create analysis type prompts (see prompts/)
-- [ ] Register analysis types via `comms compute seed`
-- [ ] Add daily conversation definition (strategy = daily, channel = NULL)
+| Query Type | Description | Implementation |
+|------------|-------------|----------------|
+| **Semantic** | "What do I know about X?" | Vector search on entity/fact embeddings |
+| **Temporal** | "What happened last week?" | Filter by episode.valid_at |
+| **Relational** | "Who does Tyler work with?" | Graph traversal (Kuzu) |
+| **Hybrid** | Combine above | Multi-stage retrieval |
 
-### Phase 2 — Extraction Pipeline
+### 6.2 Example Queries
 
-- [ ] Run memory extraction on daily conversations (cross-channel)
-- [ ] Run correction/workspace analysis on AI sessions (aix adapter)
-- [ ] Query facets for temporal context ("what happened yesterday?")
+**Semantic (SQLite + embeddings):**
+```sql
+SELECT e.*, 
+       cosine_similarity(ee.name_embedding, ?) as score
+FROM entities e
+JOIN entity_embeddings ee ON e.id = ee.entity_id
+WHERE score > 0.8
+ORDER BY score DESC
+LIMIT 10;
+```
 
-### Phase 3 — Semantic Retrieval (Next)
+**Relational (Kuzu/Cypher):**
+```cypher
+-- "Who does Tyler know through work?"
+MATCH (tyler:Entity {name: 'Tyler Brandt'})-[:RELATES_TO {relation_type: 'WORKS_AT'}]->(company)
+MATCH (company)<-[:RELATES_TO {relation_type: 'WORKS_AT'}]-(colleague)
+WHERE colleague <> tyler
+RETURN colleague.name, company.name
+```
 
-- [ ] Add search surface for facets (vector + lexical)
-- [ ] Return extracted memory signals as semantic breadcrumbs
-
-### Phase 4 — Synthesis (Deferred)
-
-- [ ] Daily/weekly summaries
-- [ ] MEMORY.md rendering
-- [ ] Episodic continuity (prior memory injection)
+**Temporal with validity:**
+```sql
+-- "What was Tyler's job in 2024?"
+SELECT r.*, se.name as source, te.name as target
+FROM relationships r
+JOIN entities se ON r.source_entity_id = se.id
+JOIN entities te ON r.target_entity_id = te.id
+WHERE se.canonical_name = 'Tyler Brandt'
+  AND r.relation_type = 'WORKS_AT'
+  AND r.valid_at <= '2024-12-31'
+  AND (r.invalid_at IS NULL OR r.invalid_at > '2024-01-01');
+```
 
 ---
 
-## CLI Commands (Deferred)
+## Part 7: Batch Processing
 
-Memory synthesis CLI commands (e.g., `nexus reflect`, `nexus memory`) should be added
-after extraction quality is solid and temporal retrieval is in place.
+### 7.1 Community Detection
+
+**Purpose:** Cluster related entities into communities for:
+- Faster retrieval (search communities first)
+- Automatic organization (project groupings, social circles)
+- Summary generation
+
+**Algorithm:**
+1. Build entity graph from relationships
+2. Run clustering (Louvain, Label Propagation)
+3. For each cluster, generate community name and summary
+4. Store as CommunityNode with HAS_MEMBER edges
+
+**This is NOT taxonomy evolution** — communities are emergent groupings, not type hierarchies.
+
+### 7.2 Taxonomy Evolution (Future Work)
+
+**Problem:** Entity types need to evolve as data grows.
+
+**Example:**
+- Start: `{type: "Company"}`
+- Later: `{type: "Company", subtype: "Startup", industry: "FinTech"}`
+
+**Approach (to be designed separately):**
+1. Periodically analyze all entities of a type
+2. Cluster by embedding similarity
+3. Propose subtype names for clusters
+4. Human reviews or auto-accepts
+5. Update entity types, re-classify existing
+
+**Note:** This builds on top of the memory system. Design separately after core system works.
+
+**Also applies to:** Relationship types (WORKS_AT vs EMPLOYED_BY), entity types, capability ontologies.
+
+See: `docs/ideas/TAXONOMY_EVOLUTION.md`
 
 ---
 
-## Open Questions
+## Part 8: Merge System (Identity Resolution)
 
-1. **Compaction threshold:** How many similar facets before we generalize? (Start with 3)
+### 8.1 Overview
 
-2. **Memory file size:** At what size do we need to split MEMORY.md into sections? (Start with 5KB limit)
+The merge system resolves when two entities should be combined into one. 
 
-3. **Cross-scope promotion:** Should patterns that appear in multiple agent memories get promoted to user level? (Probably yes, future work)
+**Critical principle:** False positives are worse than duplicates. Duplicates can be merged later; false merges corrupt data.
 
-4. **Forgetting:** When do we remove memory? Time-based decay? Explicit "forget" command?
+### 8.2 When Merge Candidates Are Created
+
+| Trigger | Confidence | Auto-Eligible? |
+|---------|------------|----------------|
+| Hard identifier collision (email, phone, handle) | 0.95+ | Yes (if no conflicts) |
+| Multiple hard identifiers match | 0.99 | Yes |
+| Contact import with identifier overlap | 0.95 | Yes |
+| Fuzzy name match (Jaccard ≥ 0.9) | 0.70-0.85 | No |
+| Compound match (name + birthdate) | 0.90 | Maybe |
+| Compound match (name + employer + city) | 0.85 | No |
+| Soft accumulation (multiple weak signals) | 0.60-0.80 | No |
+| Cross-platform name similarity | 0.50-0.70 | No |
+
+### 8.3 Merge Candidate Schema
+
+```sql
+CREATE TABLE merge_candidates (
+    id TEXT PRIMARY KEY,
+    entity_a_id TEXT NOT NULL REFERENCES entities(id),
+    entity_b_id TEXT NOT NULL REFERENCES entities(id),
+    
+    -- Scoring
+    confidence REAL NOT NULL,         -- 0.0-1.0
+    auto_eligible BOOLEAN DEFAULT FALSE,
+    
+    -- Evidence (why we think they match)
+    reason TEXT NOT NULL,             -- 'hard_identifier', 'name_similarity', 'compound', 'soft_accumulation'
+    matching_facts TEXT,              -- JSON: [{fact_type, fact_value}, ...]
+    context TEXT,                     -- JSON: additional evidence
+    candidates_considered TEXT,       -- JSON: top N candidates we scored (for debugging)
+    
+    -- Conflicts (reasons NOT to merge)
+    conflicts TEXT,                   -- JSON: [{type, values_a, values_b}, ...]
+    
+    -- Status
+    status TEXT DEFAULT 'pending',    -- 'pending', 'merged', 'rejected', 'deferred'
+    
+    -- Resolution
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolved_by TEXT,                 -- 'auto', 'user:<id>', etc.
+    resolution_reason TEXT,
+    
+    UNIQUE(entity_a_id, entity_b_id)
+);
+
+CREATE INDEX idx_merge_candidates_status ON merge_candidates(status);
+CREATE INDEX idx_merge_candidates_auto ON merge_candidates(auto_eligible) WHERE status = 'pending';
+```
+
+### 8.4 Collision Detection Algorithm
+
+Uses O(F) approach from IDENTITY_RESOLUTION_PLAN.md — iterate through facts, not person pairs.
+
+```python
+def detect_collisions():
+    # Phase 1: Hard identifier collisions
+    for alias_type in ['email', 'phone', 'handle']:
+        collisions = sql("""
+            SELECT alias, GROUP_CONCAT(entity_id) as entities
+            FROM entity_aliases
+            WHERE alias_type = ?
+            GROUP BY alias
+            HAVING COUNT(DISTINCT entity_id) > 1
+        """, alias_type)
+        
+        for collision in collisions:
+            entities = collision.entities.split(',')
+            create_merge_candidate(
+                entities=entities,
+                reason='hard_identifier',
+                confidence=0.95,
+                auto_eligible=True,
+                matching_facts=[{type: alias_type, value: collision.alias}]
+            )
+    
+    # Phase 2: Compound identifier matching
+    # name + birthdate, name + employer + city, etc.
+    compound_matches = find_compound_matches()
+    for match in compound_matches:
+        create_merge_candidate(
+            entities=[match.entity_a, match.entity_b],
+            reason='compound',
+            confidence=match.confidence,
+            auto_eligible=(match.confidence >= 0.90),
+            matching_facts=match.facts
+        )
+    
+    # Phase 3: Soft identifier accumulation
+    scores = {}  # (entity_a, entity_b) -> score
+    for fact_type, weight in SOFT_IDENTIFIER_WEIGHTS.items():
+        collisions = find_fact_collisions(fact_type)
+        for collision in collisions:
+            for pair in pairs(collision.entities):
+                scores[pair] += weight
+    
+    for pair, score in scores.items():
+        if score >= 0.6:
+            create_merge_candidate(
+                entities=list(pair),
+                reason='soft_accumulation',
+                confidence=score,
+                auto_eligible=False,
+                matching_facts=get_shared_facts(pair)
+            )
+```
+
+### 8.5 Conflict Detection
+
+Before auto-merging, check for conflicts:
+
+```python
+def detect_conflicts(entity_a, entity_b) -> list[Conflict]:
+    conflicts = []
+    
+    # Different hard identifiers of same type
+    for alias_type in ['phone', 'email']:
+        aliases_a = get_aliases(entity_a, alias_type)
+        aliases_b = get_aliases(entity_b, alias_type)
+        if aliases_a and aliases_b and not aliases_a.intersection(aliases_b):
+            # Both have phones, but different phones = conflict
+            conflicts.append(Conflict(
+                type=f'different_{alias_type}s',
+                values_a=list(aliases_a),
+                values_b=list(aliases_b)
+            ))
+    
+    # Different birthdates
+    bday_a = get_attribute(entity_a, 'birthdate')
+    bday_b = get_attribute(entity_b, 'birthdate')
+    if bday_a and bday_b and bday_a != bday_b:
+        conflicts.append(Conflict(
+            type='different_birthdates',
+            values_a=bday_a,
+            values_b=bday_b
+        ))
+    
+    # Temporal impossibilities (e.g., can't work at two places at once)
+    # ... additional conflict checks ...
+    
+    return conflicts
+```
+
+### 8.6 Auto-Merge Rules
+
+```python
+def should_auto_merge(candidate: MergeCandidate) -> bool:
+    # Rule 1: Hard identifier with high confidence, no conflicts
+    if candidate.reason == 'hard_identifier':
+        if candidate.confidence >= 0.95 and not candidate.conflicts:
+            return True
+    
+    # Rule 2: Multiple hard identifiers match
+    hard_matches = count_hard_identifier_matches(candidate)
+    if hard_matches >= 2:
+        return True
+    
+    # Rule 3: Contact import with identifier overlap
+    if both_from_contact_import(candidate) and has_identifier_overlap(candidate):
+        return True
+    
+    # Default: Don't auto-merge (require human review)
+    return False
+
+def process_merge_candidates():
+    pending = get_pending_candidates()
+    
+    for candidate in pending:
+        # Check for conflicts
+        conflicts = detect_conflicts(candidate.entity_a, candidate.entity_b)
+        candidate.conflicts = conflicts
+        
+        if conflicts:
+            candidate.auto_eligible = False
+        elif should_auto_merge(candidate):
+            execute_merge(candidate, resolved_by='auto')
+        else:
+            # Leave for human review
+            pass
+```
+
+### 8.7 Merge Execution
+
+```python
+def execute_merge(candidate: MergeCandidate, resolved_by: str):
+    source = candidate.entity_a  # Will be merged into target
+    target = candidate.entity_b  # Will remain
+    
+    # 1. Move all aliases from source to target
+    sql("UPDATE entity_aliases SET entity_id = ? WHERE entity_id = ?", 
+        target.id, source.id)
+    
+    # 2. Update all relationships to point to target
+    sql("UPDATE relationships SET source_entity_id = ? WHERE source_entity_id = ?",
+        target.id, source.id)
+    sql("UPDATE relationships SET target_entity_id = ? WHERE target_entity_id = ?",
+        target.id, source.id)
+    
+    # 3. Move episode mentions
+    sql("""
+        INSERT OR REPLACE INTO episode_entity_mentions (episode_id, entity_id, mention_count, created_at)
+        SELECT episode_id, ?, mention_count, created_at
+        FROM episode_entity_mentions WHERE entity_id = ?
+    """, target.id, source.id)
+    sql("DELETE FROM episode_entity_mentions WHERE entity_id = ?", source.id)
+    
+    # 4. Merge attributes (target wins on conflict)
+    merged_attrs = {**source.attributes, **target.attributes}
+    sql("UPDATE entities SET attributes = ? WHERE id = ?", 
+        json.dumps(merged_attrs), target.id)
+    
+    # 5. Update canonical name if source has better name
+    if is_better_name(source.canonical_name, target.canonical_name):
+        sql("UPDATE entities SET canonical_name = ? WHERE id = ?",
+            source.canonical_name, target.id)
+    
+    # 6. Mark source as merged (don't delete for audit trail)
+    sql("""
+        UPDATE entities 
+        SET merged_into = ?, 
+            canonical_name = canonical_name || ' [MERGED→' || ? || ']'
+        WHERE id = ?
+    """, target.id, target.canonical_name, source.id)
+    
+    # 7. Log the merge
+    sql("""
+        INSERT INTO merge_events 
+        (id, source_entity_id, target_entity_id, merge_type, triggering_facts, 
+         similarity_score, created_at, resolved_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, uuid(), source.id, target.id, candidate.reason, 
+        json.dumps(candidate.matching_facts), candidate.confidence, 
+        now(), resolved_by)
+    
+    # 8. Update candidate status
+    sql("""
+        UPDATE merge_candidates 
+        SET status = 'merged', resolved_at = ?, resolved_by = ?
+        WHERE id = ?
+    """, now(), resolved_by, candidate.id)
+```
+
+### 8.8 CLI Interface
+
+```bash
+# List pending merge candidates
+cortex identify merge-candidates [--status pending|merged|rejected]
+cortex identify merge-candidates --auto-eligible
+
+# Show candidate details
+cortex identify merge-candidate <id>
+# Output:
+# ┌─────────────────────────────────────────────────────────────┐
+# │ Merge Candidate: mc_abc123                                   │
+# ├─────────────────────────────────────────────────────────────┤
+# │ Entity A: Tyler Brandt (Person)                              │
+# │   Origin: contact_import (iMessage)                          │
+# │   Aliases: +1-707-287-6731, tnapathy@gmail.com               │
+# │   Relationships: WORKS_AT Intent Systems                     │
+# │                                                              │
+# │ Entity B: Tyler B (Person)                                   │
+# │   Origin: contact_import (Gmail)                             │
+# │   Aliases: tyler@anthropic.com                               │
+# │   Relationships: WORKS_AT Anthropic                          │
+# │                                                              │
+# │ Match Reason: name_similarity (Jaccard: 0.91)                │
+# │ Confidence: 0.75                                             │
+# │ Auto-eligible: No                                            │
+# │                                                              │
+# │ Conflicts:                                                   │
+# │   ⚠ Different employers: Intent Systems vs Anthropic        │
+# │                                                              │
+# │ Candidates Considered:                                       │
+# │   1. Tyler Brandt (score: 0.91) ← selected                   │
+# │   2. Tyler (coffee shop) (score: 0.45)                       │
+# │   3. Tyler (college) (score: 0.38)                           │
+# │                                                              │
+# │ Recommendation: REVIEW (possible job change)                 │
+# └─────────────────────────────────────────────────────────────┘
+
+# Accept/reject
+cortex identify accept <id> [--reason "same person, job change"]
+cortex identify reject <id> [--reason "different people"]
+
+# Bulk operations
+cortex identify accept --all-auto  # Accept all auto-eligible
+cortex identify run-detection      # Run collision detection
+
+# Manual merge
+cortex identify merge <entity_a> <entity_b> [--force]
+
+# Stats
+cortex identify status
+# Output:
+# Identity Resolution Status:
+#   Active entities:     1,234
+#   Merged entities:       56
+#   Pending candidates:    12 (3 auto-eligible)
+#   Aliases:            2,456
+#   Relationships:      3,789
+```
 
 ---
 
-## Summary
+## Part 9: Implementation Plan
 
-This spec builds a memory layer on top of comms:
+### Phase 1: Schema & Naming
+- [ ] Rename segments → episodes (tables, columns, code)
+- [ ] Add entities table
+- [ ] Add entity_aliases table
+- [ ] Add relationships table
+- [ ] Add relationship_mentions table
+- [ ] Add entity/relationship embeddings tables
+- [ ] Add episode_entity_mentions table
 
-1. **New analysis types** extract memory-relevant facets from conversations
-2. **Scope assignment** routes facets to workspace/user/agent level
-3. **Synthesis pipeline** compacts and generalizes facets into MEMORY.md
-4. **Background execution** via heartbeat/cron keeps memory fresh
+### Phase 2: Entity Extraction
+- [ ] Implement entity extraction using prompts
+- [ ] Implement entity embedding
+- [ ] Implement entity resolution (search + LLM)
+- [ ] Integrate with contacts (pre-seeded entities)
 
-The result: agents have access to evolving, structured memory about the workspace, user, and their own task-specific learnings — all derived automatically from conversation history.
+### Phase 3: Relationship Extraction
+- [ ] Implement relationship extraction using prompts
+- [ ] Implement temporal bounds extraction
+- [ ] Implement relationship resolution (dedup)
+- [ ] Implement contradiction detection
+
+### Phase 4: Identity System
+- [ ] Implement identity promotion (relationships → aliases)
+- [ ] Implement collision detection (O(F) algorithm)
+- [ ] Implement merge candidate creation
+- [ ] Implement auto-merge rules
+- [ ] Implement merge execution
+- [ ] Add CLI for merge review
+
+### Phase 5: Chunking Improvements
+- [ ] Refactor chunking to generic interface
+- [ ] Implement semantic chunking
+- [ ] Implement token-limit chunking
+- [ ] Per-channel strategy configuration
+
+### Phase 6: Query Layer
+- [ ] Unified search across entities + episodes
+- [ ] Relational queries (graph traversal)
+- [ ] Temporal queries with validity filtering
+
+### Phase 7: Batch Processing
+- [ ] Community detection job
+- [ ] Entity summary refresh job
+- [ ] (Deferred) Taxonomy evolution
+
+---
+
+## Part 10: Open Questions
+
+### Resolved in This Spec
+
+| Question | Decision |
+|----------|----------|
+| Segments vs Episodes? | **Episodes** (rename) |
+| Facets vs Relationships? | **Both** (raw facet + deduplicated relationship) |
+| SQLite vs Graph DB? | **SQLite-only** (recursive CTEs handle our queries) |
+| Contacts integration? | **Pre-seeded entities** (generalizes People/Contacts) |
+| Chunking naming? | **Generic strategies** (not channel-specific) |
+| Episode lookback? | **Configurable** per episode_definition |
+| Previous memory influence? | **Resolution-time context** (not extraction-time) |
+| Entity source field? | **origin** = how created, channels derived from episodes |
+| Separate embedding tables? | **Unified** embeddings table with target_type |
+| Multiple Tylers problem? | **Context scoring + conservative merging** |
+| Cross-platform contacts? | **merge_candidates table** for review |
+| PII extraction? | **Unified** with entity extraction |
+| Entity summaries? | **Lazy generation** (deferred) |
+| Relationship type taxonomy? | **Free-form strings** (taxonomy evolution later) |
+| Emails/phones as entities or aliases? | **Aliases (can be shared across entities)** |
+| person_facts migration? | **Mapped to relationships + identity promotion** |
+| Auto-merge rules? | **Defined in Part 8** |
+| Track candidates considered? | **Yes**, stored in merge_candidates.candidates_considered |
+| Entity types? | **Configurable**, defaults: Person, Company, Project, Location, Event, Document, Pet |
+| Soft facts (birthdate, profession)? | **entity.attributes** JSON field |
+| Shared identifiers? | **Aliases can be shared** (is_shared=TRUE) |
+
+### Still Open
+
+1. **Embedding model**: Same model for entities, relationships, and episodes? Or specialized?
+
+2. **Exact thresholds**: Fine-tune confidence thresholds for auto-merge (currently 0.95).
+
+3. **Batch job frequency**: How often to run collision detection? Community detection?
+
+4. **Conflict resolution UX**: When conflicts detected, what's the interface for resolution?
+
+---
+
+## Appendix A: Prompts Reference
+
+All prompts live in `prompts/graphiti/`:
+
+| Prompt | Purpose |
+|--------|---------|
+| `extract-entities-message.prompt.md` | Entity extraction from messages |
+| `extract-entities-text.prompt.md` | Entity extraction from plain text |
+| `extract-relationships.prompt.md` | Relationship triple extraction |
+| `extract-dates.prompt.md` | Temporal bounds refinement |
+| `resolve-entities.prompt.md` | Entity deduplication |
+| `resolve-edges.prompt.md` | Relationship deduplication |
+| `detect-contradictions.prompt.md` | Find contradicted facts |
+| `reflexion-entities.prompt.md` | Self-check for missed entities |
+| `reflexion-relationships.prompt.md` | Self-check for missed relationships |
+| `summarize-entity.prompt.md` | Entity summary generation |
+
+---
+
+## Appendix B: References
+
+- [Graphiti](https://github.com/getzep/graphiti) — Temporal knowledge graph framework
+- [Cognee](https://github.com/topoteretes/cognee) — AI memory with graph + vector
+- [Kuzu](https://kuzudb.com/) — Embedded graph database
+- [Zep Paper](https://arxiv.org/abs/2501.13956) — Temporal Knowledge Graph Architecture for Agent Memory
+
+---
+
+*This document is the specification for the Cortex memory system. Implementation should follow the phases outlined in Part 9.*

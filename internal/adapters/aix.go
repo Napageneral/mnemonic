@@ -29,7 +29,7 @@ func NewAixAdapter(source string) (*AixAdapter, error) {
 		return nil, fmt.Errorf("aix adapter requires source (e.g. cursor)")
 	}
 
-	dbPath, err := defaultAixDBPath()
+	dbPath, err := DefaultAixDBPath()
 	if err != nil {
 		return nil, err
 	}
@@ -59,6 +59,8 @@ func (a *AixAdapter) Sync(ctx context.Context, cortexDB *sql.DB, full bool) (Syn
 		return result, fmt.Errorf("failed to open aix database: %w", err)
 	}
 	defer aixDB.Close()
+	// Reduce transient SQLITE_BUSY errors while aix is writing.
+	_, _ = aixDB.Exec("PRAGMA busy_timeout = 5000")
 
 	// Enable foreign keys on cortex DB
 	if _, err := cortexDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
@@ -483,7 +485,7 @@ func (a *AixAdapter) syncMessages(
 		}
 
 		// Insert if new.
-		res, err := stmtInsertEvent.Exec(eventID, tsSec, "cursor", contentTypesText, content.String, direction, threadID, a.Name(), messageID, metadataArg)
+		res, err := stmtInsertEvent.Exec(eventID, tsSec, a.source, contentTypesText, content.String, direction, threadID, a.Name(), messageID, metadataArg)
 		if err != nil {
 			return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("insert event: %w", err)
 		}
@@ -576,7 +578,7 @@ func (a *AixAdapter) syncMessages(
 		eventID := toolAdapterPrefix + sourceID
 		threadID := threadPrefix + sessionID
 
-		res, err := stmtInsertToolEvent.Exec(eventID, tsSec, "cursor", contentTypesText, command, "observed", threadID, toolAdapter, sourceID, metaJSON)
+		res, err := stmtInsertToolEvent.Exec(eventID, tsSec, a.source, contentTypesText, command, "observed", threadID, toolAdapter, sourceID, metaJSON)
 		if err != nil {
 			return created, updated, maxImportedTS, maxImportedEventID, personsCreated, perf, fmt.Errorf("insert tool event: %w", err)
 		}
@@ -695,7 +697,7 @@ func (a *AixAdapter) syncSessions(aixDB, cortexDB *sql.DB, lastSyncSeconds int64
 
 		res, err := stmtInsertThread.Exec(
 			threadID,
-			"cursor",
+			a.source,
 			threadName,
 			a.Name(),
 			sessionID,
@@ -814,7 +816,15 @@ func isTerminalToolName(name string) bool {
 	}
 }
 
+// DefaultAixDBPath returns the default path for aix.db.
+func DefaultAixDBPath() (string, error) {
+	return defaultAixDBPath()
+}
+
 func defaultAixDBPath() (string, error) {
+	if override := os.Getenv("AIX_DB_PATH"); strings.TrimSpace(override) != "" {
+		return filepath.Clean(os.ExpandEnv(override)), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -96,6 +97,12 @@ func NewEngine(db *sql.DB, geminiClient *gemini.Client, cfg Config) (*Engine, er
 	if err := queue.Init(db); err != nil {
 		return nil, fmt.Errorf("init queue schema: %w", err)
 	}
+
+	analysisModel, err := normalizeAnalysisModel(cfg.AnalysisModel)
+	if err != nil {
+		return nil, err
+	}
+	cfg.AnalysisModel = analysisModel
 
 	q := queue.New(db)
 
@@ -687,6 +694,12 @@ func (e *Engine) handleAnalysisJob(ctx context.Context, job *queue.Job) error {
 		if err != nil {
 			return fmt.Errorf("build segment text (masked): %w", err)
 		}
+	} else if analysisTypeName == "turn_quality_v1" {
+		var err error
+		segText, err = e.buildTurnQualityText(ctx, payload.SegmentID)
+		if err != nil {
+			return fmt.Errorf("build segment text (turn quality): %w", err)
+		}
 	} else {
 		if cached, ok := e.getSegmentTextCached(payload.SegmentID); ok {
 			segText = cached
@@ -797,11 +810,13 @@ func (e *Engine) handleAnalysisJob(ctx context.Context, job *queue.Job) error {
 
 	if outputType == "structured" {
 		req.GenerationConfig = &gemini.GenerationConfig{
+			ResponseMimeType: "application/json",
+		}
+		if supportsThinkingModel(e.analysisModel) {
 			// ThinkingLevel: "minimal" dramatically reduces per-call latency for
 			// structured extraction tasks by minimizing the model's "thinking" phase.
 			// This is critical for high-throughput bulk processing.
-			ThinkingConfig:   &gemini.ThinkingConfig{ThinkingLevel: "minimal"},
-			ResponseMimeType: "application/json",
+			req.GenerationConfig.ThinkingConfig = &gemini.ThinkingConfig{ThinkingLevel: "minimal"}
 		}
 
 		// Add response schema for known analysis types (improves output reliability)
@@ -1070,6 +1085,43 @@ func (e *Engine) buildSegmentText(ctx context.Context, segmentID string) (string
 	}
 
 	return sb.String(), rows.Err()
+}
+
+// buildTurnQualityText builds a compact turn-quality input using user messages only.
+func (e *Engine) buildTurnQualityText(ctx context.Context, segmentID string) (string, error) {
+	rows, err := e.db.QueryContext(ctx, `
+		SELECT e.content, e.direction
+		FROM segment_events se
+		JOIN events e ON se.event_id = e.id
+		WHERE se.segment_id = ?
+		  AND e.direction IN ('sent', 'received')
+		ORDER BY se.position
+	`, segmentID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	for rows.Next() {
+		var content sql.NullString
+		var direction string
+		if err := rows.Scan(&content, &direction); err != nil {
+			return "", err
+		}
+		if !content.Valid || strings.TrimSpace(content.String) == "" {
+			continue
+		}
+		label := "User"
+		if direction == "received" {
+			label = "Assistant"
+		}
+		sb.WriteString(fmt.Sprintf("%s: %s\n", label, strings.TrimSpace(content.String)))
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return sb.String(), nil
 }
 
 // buildSegmentTextMasked builds text for PII extraction with anonymized speaker labels.
@@ -1435,10 +1487,24 @@ func extractValues(data map[string]any, path string) []string {
 
 func extractValuesRecursive(data any, parts []string) []string {
 	if len(parts) == 0 {
-		if s, ok := data.(string); ok {
-			return []string{s}
+		switch v := data.(type) {
+		case string:
+			return []string{v}
+		case bool:
+			return []string{strconv.FormatBool(v)}
+		case float64:
+			return []string{strconv.FormatFloat(v, 'f', -1, 64)}
+		case float32:
+			return []string{strconv.FormatFloat(float64(v), 'f', -1, 32)}
+		case int:
+			return []string{strconv.Itoa(v)}
+		case int64:
+			return []string{strconv.FormatInt(v, 10)}
+		case json.Number:
+			return []string{v.String()}
+		default:
+			return nil
 		}
-		return nil
 	}
 
 	part := parts[0]
@@ -1484,6 +1550,28 @@ func float64SliceToBlob(values []float64) []byte {
 func hashText(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:])
+}
+
+func supportsThinkingModel(model string) bool {
+	name := strings.ToLower(strings.TrimSpace(model))
+	if name == "" {
+		return false
+	}
+	return strings.Contains(name, "thinking") ||
+		strings.HasPrefix(name, "gemini-3") ||
+		strings.HasPrefix(name, "gemini-2.5")
+}
+
+func normalizeAnalysisModel(model string) (string, error) {
+	name := strings.TrimSpace(model)
+	if name == "" {
+		return "gemini-3-flash-preview", nil
+	}
+	lower := strings.ToLower(name)
+	if !strings.HasPrefix(lower, "gemini-3") {
+		return "", fmt.Errorf("analysis model must be gemini-3.* (got %s)", name)
+	}
+	return name, nil
 }
 
 // getResponseSchema returns the Gemini response schema for known analysis types
@@ -1604,6 +1692,63 @@ func getResponseSchema(analysisTypeName string) any {
 				},
 			},
 			"required": []string{"facts"},
+		}
+	case "turn_quality_v1":
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"feedback": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"message_index": map[string]any{"type": "integer"},
+							"sentiment":     map[string]any{"type": "string"},
+							"correction":    map[string]any{"type": "boolean"},
+							"frustration":   map[string]any{"type": "boolean"},
+							"praise":        map[string]any{"type": "boolean"},
+							"confusion":     map[string]any{"type": "boolean"},
+							"acceptance":    map[string]any{"type": "boolean"},
+							"evidence": map[string]any{
+								"type":  "array",
+								"items": map[string]any{"type": "string"},
+							},
+						},
+						"required": []string{
+							"message_index",
+							"sentiment",
+							"correction",
+							"frustration",
+							"praise",
+							"confusion",
+							"acceptance",
+							"evidence",
+						},
+					},
+				},
+				"aggregate": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"positive_streak":   map[string]any{"type": "integer"},
+						"negative_streak":   map[string]any{"type": "integer"},
+						"correction_count":  map[string]any{"type": "integer"},
+						"frustration_count": map[string]any{"type": "integer"},
+						"praise_count":      map[string]any{"type": "integer"},
+						"quality_score":     map[string]any{"type": "number"},
+						"quality_band":      map[string]any{"type": "string"},
+					},
+					"required": []string{
+						"positive_streak",
+						"negative_streak",
+						"correction_count",
+						"frustration_count",
+						"praise_count",
+						"quality_score",
+						"quality_band",
+					},
+				},
+			},
+			"required": []string{"feedback", "aggregate"},
 		}
 	default:
 		return nil

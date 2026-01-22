@@ -1,18 +1,16 @@
 ---
-summary: "Complete architectural evolution: initial goals → current state → refined design"
+summary: "PRIMARY architectural reference for Cortex - the workspace intelligence layer"
 read_when:
-  - Starting any work on comms/cortex
-  - Understanding why architectural decisions were made
-  - Picking up work on segments, extraction, or routing
+  - Starting any work on cortex
+  - Understanding architectural decisions
+  - Planning new features
+  - Onboarding to the codebase
 ---
-# Architecture Evolution — Comms → Cortex
+# Cortex — Architecture & Status
 
-This document consolidates three prior specs and a design session into a unified architectural vision. It serves as the single source of truth for where we are and where we're going.
+**Cortex** is the workspace's intelligence layer. This document is the primary architectural reference - the single source of truth for vision, current state, and future work.
 
-**Prior documents (superseded by this one):**
-- `UNIFIED_SEMANTIC_LAYER.md` — broker/workspace vision
-- `SEMANTIC_CONTEXT_ENGINE_IMPLEMENTATION_PLAN.md` — search infrastructure
-- `MEMORY_SYSTEM_SPEC.md` — memory extraction from AI sessions
+**Last updated:** January 2026
 
 ---
 
@@ -267,26 +265,25 @@ It's the workspace's intelligence layer. The broker's data backend. What makes a
 
 ## Part 6: Implementation Priorities
 
-### Immediate (Schema + Sync)
+### Completed ✅
 
-1. **Rename tables** — `conversations` → `segments`, update all references
-2. **Add event_id to analysis_runs** — enable event-level extraction
-3. **Sync ALL AIX metadata** — capabilities, lints, files, codeblocks
-4. **Drop checkpoint tables** — migrate any existing data to segments + analyses
-5. **AIX watcher** — fsnotify on AIX db file for live sync
+1. ~~**Rename tables**~~ — `conversations` → `segments` ✅
+2. ~~**Sync ALL AIX metadata**~~ — capabilities, lints, files, codeblocks stored in `metadata_json` ✅
+3. ~~**Turn-pair chunking strategy**~~ — `strategy: "turn_pair"` implemented ✅
+4. ~~**Event-level extraction for AIX**~~ — `cortex extract aix-metadata` extracts facets ✅
+5. ~~**Hybrid search API**~~ — vector + FTS5 BM25 implemented ✅
+6. ~~**Document indexing**~~ — Skills indexed via `cortex documents index` ✅
+7. ~~**iMessage watcher**~~ — fsnotify on chat.db ✅
+8. ~~**AIX watcher**~~ — fsnotify on aix.db (`cortex watch aix`) ✅
+9. ~~**Auto-create ai_turn_pair definition**~~ — seeded via `cortex chunk seed` ✅
+10. ~~**Quality analysis type**~~ — `turn_quality_v1` + `cortex extract turn-quality` ✅
+11. ~~**Routing search API**~~ — `search.SearchSegments` + `cortex route` ✅
 
-### Next (Extraction + Search)
+### Next (Routing + Memory)
 
-6. **Turn-pair chunking strategy** — `strategy: "turn_pair"` for AI sessions
-7. **Event-level extraction for AIX** — auto-populate facets from metadata
-8. **Quality analysis type** — `turn_quality_v1` for correction/frustration/praise signals
-9. **Hybrid search API** — vector + BM25 over segments and facets
-
-### Later (Routing + Memory)
-
-10. **Routing infrastructure** — candidate generation, scoring, threshold decisions
-11. **Freshness scoring** — file state hashes for context staleness
-12. **Memory synthesis** — sequential compaction (still deferred)
+12. **Routing decision logic** — candidate scoring, thresholds, ambiguity handling
+13. **Freshness scoring** — file state hashes for context staleness
+14. **Memory synthesis** — sequential compaction (still deferred)
 
 ---
 
@@ -315,27 +312,65 @@ It's the workspace's intelligence layer. The broker's data backend. What makes a
 | Concept | What It Is | Status |
 |---------|------------|--------|
 | **Events** | Raw source of record | ✅ Built |
-| **Segments** | Temporal groupings of events | ✅ Built (as conversations), needs rename |
-| **Analyses** | Derived information on events/segments | ✅ Built, needs event_id support |
+| **Segments** | Temporal groupings of events | ✅ Built (renamed from conversations) |
+| **Analyses** | Derived information on events/segments | ✅ Built |
 | **Facets** | Queryable extracted values | ✅ Built |
-| **Embeddings** | Vector store | ✅ Built |
-| **AIX sync** | Messages + sessions | ✅ Built, metadata incomplete |
-| **AIX watcher** | Live sync on file change | ❌ Not built |
-| **Checkpoint tables** | Parallel structure | ❌ To be removed |
-| **Routing** | Find segment to fork from | ❌ Not built |
+| **Embeddings** | Vector store + batcher | ✅ Built |
+| **AIX sync** | Messages + sessions + metadata | ✅ Built |
+| **AIX metadata → facets** | Extract file_reference, tool_invocation, mode, capability | ✅ Built (`cortex extract aix-metadata`) |
+| **Document indexing** | Skills indexed into document_heads | ✅ Built (`cortex documents index`) |
+| **Hybrid search** | Vector + FTS5 BM25 | ✅ Built (`cortex search`, `cortex documents search`) |
+| **Turn-pair strategy** | Chunking strategy for AI turns | ✅ Built (definition seeded: `ai_turn_pair`) |
+| **Turn quality analysis** | Per-turn quality signals | ✅ Built (`turn_quality_v1`) |
+| **iMessage watcher** | Live sync on chat.db change | ✅ Built (`cortex watch imessage`) |
+| **AIX watcher** | Live sync on aix.db change | ✅ Built (`cortex watch aix`) |
+| **Routing infrastructure** | Routing search API | ✅ Built (search + `cortex route`, decision logic pending) |
 | **Synthesis** | Compressed memory | ⏸️ Deferred |
 
 **The core insight:** Events → Segments → Analyses → Facets. One pipeline. Everything flows through it. Checkpoints, quality signals, metadata — all become analyses and facets on segments.
 
 ---
 
+## Part 8: Future Ideas (Backlog)
+
+Ideas captured from brainstorming sessions for future work:
+
+### Routing & Context Assembly
+- **Broker integration** — Wire to Nexus broker's `before_agent_start` hook for context injection
+- **LLM reranking** — Optional LLM-assisted ranking for top-N routing candidates
+- **Routing policy config** — Configurable per channel/use case vs one policy
+- **Cross-session continuity** — When does related work in different sessions count as "same project"?
+
+### Memory & Synthesis
+- **Memory hierarchy** — Workspace/User/Agent scoped MEMORY.md files
+- **Compaction threshold** — How many similar facets before generalizing? (Start with 3)
+- **Memory file size** — When to split MEMORY.md? (Start with 5KB limit)
+- **Cross-scope promotion** — Patterns in multiple agent memories promote to user level?
+- **Forgetting** — Time-based decay? Explicit forget command?
+
+### Search Enhancements
+- **Retrieval metrics** — Track document retrieval frequency for relevance tuning
+- **qmd integration** — Alternative BM25 backend (vs FTS5)
+- **Freshness bonus** — `α * bm25 + β * vector + γ * freshness` scoring
+
+### Identity Resolution
+- **PII post-processing pipeline** — Key allowlist, alias mapping, canonicalization
+- **Ontology from corpus** — Cluster extracted keys to propose canonical ontology
+- **Segment chunking experiments** — 50-100 vs 500 vs monthly chunk sizes
+
+### Analysis Types to Add
+- `daily_memory_v1` — Cross-channel daily memory extraction
+- `weekly_narrative_v1` — Freeform weekly summary
+
+---
+
 ## Handoff Notes
 
-This document supersedes the three prior specs. When continuing work:
+This document is the primary architectural reference. When continuing work:
 
 1. **Read this first** — it's the unified truth
-2. **Schema changes are the foundation** — do those before feature work
-3. **AIX metadata is high value** — prioritize syncing all of it
-4. **Routing is the interesting problem** — but it needs segments + facets solid first
+2. **Check the schema** — `internal/db/schema.sql` is ground truth for data model
+3. **Routing decision logic is the gap** — search API is built, scoring is not
+4. **Memory synthesis is deferred** — extraction first
 
-The prior specs have valuable detail on specific subsystems (search API, memory prompts, checkpoint scoring). Reference them for implementation specifics, but this document defines the architecture.
+Prompts for memory extraction live in `prompts/`. Test cases in `docs/MEMORY_PROMPT_TESTS.md`.

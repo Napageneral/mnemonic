@@ -27,6 +27,7 @@ import (
 	"github.com/Napageneral/cortex/internal/gemini"
 	"github.com/Napageneral/cortex/internal/identify"
 	"github.com/Napageneral/cortex/internal/importer"
+	"github.com/Napageneral/cortex/internal/live"
 	"github.com/Napageneral/cortex/internal/me"
 	"github.com/Napageneral/cortex/internal/query"
 	"github.com/Napageneral/cortex/internal/search"
@@ -1153,7 +1154,7 @@ queryable event store with identity resolution.`,
 			defer database.Close()
 
 			// Create context
-			ctx := context.Background()
+			ctx := cmd.Context()
 
 			// Sync adapters
 			var syncResult sync.SyncResult
@@ -1451,6 +1452,103 @@ queryable event store with identity resolution.`,
 		Short: "Run a local webhook receiver to trigger sync",
 	}
 
+	// watch run: run all live-enabled watchers with restart + heartbeats
+	watchRunCmd := &cobra.Command{
+		Use:   "run",
+		Short: "Run all live-enabled adapter watchers",
+		Run: func(cmd *cobra.Command, args []string) {
+			heartbeatSec, _ := cmd.Flags().GetInt("heartbeat-seconds")
+			restartSec, _ := cmd.Flags().GetInt("restart-seconds")
+
+			cfg, err := config.Load()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to load config: %v\n", err)
+				os.Exit(1)
+			}
+
+			database, err := db.Open()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			sigChan := make(chan os.Signal, 1)
+			signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+			go func() {
+				<-sigChan
+				fmt.Fprintf(os.Stderr, "\nStopping live watchers...\n")
+				cancel()
+			}()
+
+			manager := live.NewManager(database, cfg)
+			if heartbeatSec > 0 {
+				manager.HeartbeatInterval = time.Duration(heartbeatSec) * time.Second
+			}
+			if restartSec > 0 {
+				manager.RestartBackoff = time.Duration(restartSec) * time.Second
+			}
+
+			fmt.Println("Starting live watchers (Ctrl+C to stop)...")
+			if err := manager.Run(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "watch run error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+	watchRunCmd.Flags().Int("heartbeat-seconds", 10, "Heartbeat interval for live status")
+	watchRunCmd.Flags().Int("restart-seconds", 3, "Base restart backoff seconds")
+
+	// watch status: show live watcher status
+	watchStatusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show live watcher status",
+		Run: func(cmd *cobra.Command, args []string) {
+			cfg, err := config.Load()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to load config: %v\n", err)
+				os.Exit(1)
+			}
+
+			database, err := db.Open()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			statuses, err := live.GetStatuses(database, cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to get status: %v\n", err)
+				os.Exit(1)
+			}
+
+			if jsonOutput {
+				printJSON(map[string]any{"ok": true, "watchers": statuses})
+				return
+			}
+
+			for _, st := range statuses {
+				lastBeat := "-"
+				if st.LastHeartbeat != nil {
+					lastBeat = time.Unix(*st.LastHeartbeat, 0).Format(time.RFC3339)
+				}
+				status := st.Status
+				if status == "" {
+					status = "unknown"
+				}
+				fmt.Printf("%s (%s) enabled=%v supported=%v status=%s last_heartbeat=%s restarts=%d\n",
+					st.Adapter, st.Type, st.Enabled, st.Supported, status, lastBeat, st.Restarts)
+				if st.LastError != "" {
+					fmt.Printf("  last_error: %s\n", st.LastError)
+				}
+			}
+		},
+	}
+
 	// watch gmail: receive forwarded Pub/Sub events from `gog gmail watch serve`
 	watchGmailCmd := &cobra.Command{
 		Use:   "gmail",
@@ -1707,8 +1805,135 @@ queryable event store with identity resolution.`,
 	}
 	watchIMessageCmd.Flags().Int("debounce-seconds", 2, "Minimum seconds between sync triggers")
 
+	// watch aix: watch aix.db for changes and trigger incremental sync
+	watchAIXCmd := &cobra.Command{
+		Use:   "aix",
+		Short: "Watch aix.db for new AI session events and sync incrementally",
+		Run: func(cmd *cobra.Command, args []string) {
+			source, _ := cmd.Flags().GetString("source")
+			debounceSec, _ := cmd.Flags().GetInt("debounce-seconds")
+			extractMetadata, _ := cmd.Flags().GetBool("extract-metadata")
+
+			database, err := db.Open()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			adapter, err := adapters.NewAixAdapter(source)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to create AIX adapter: %v\n", err)
+				os.Exit(1)
+			}
+
+			aixDBPath, err := adapters.DefaultAixDBPath()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to determine aix.db path: %v\n", err)
+				os.Exit(1)
+			}
+			aixDBDir := filepath.Dir(aixDBPath)
+
+			watcher, err := fsnotify.NewWatcher()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to create watcher: %v\n", err)
+				os.Exit(1)
+			}
+			defer watcher.Close()
+
+			if err := watcher.Add(aixDBDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to watch %s: %v\n", aixDBDir, err)
+				os.Exit(1)
+			}
+
+			fmt.Printf("Watching for AIX changes in %s (debounce: %ds)\n", aixDBDir, debounceSec)
+			fmt.Println("Press Ctrl+C to stop")
+
+			getLastSync := func() int64 {
+				var lastSync int64
+				_ = database.QueryRow(`SELECT last_sync_at FROM sync_watermarks WHERE adapter = ?`, adapter.Name()).Scan(&lastSync)
+				return lastSync
+			}
+
+			runSync := func() {
+				ctx := context.Background()
+				lastSync := getLastSync()
+				result, err := adapter.Sync(ctx, database, false)
+				if err != nil {
+					fmt.Printf("[%s] Sync error: %v\n", time.Now().Format("15:04:05"), err)
+					return
+				}
+				if result.EventsCreated > 0 || result.EventsUpdated > 0 {
+					fmt.Printf("[%s] Synced %d events (%d new, %d updated)\n",
+						time.Now().Format("15:04:05"),
+						result.EventsCreated+result.EventsUpdated,
+						result.EventsCreated,
+						result.EventsUpdated,
+					)
+				} else {
+					fmt.Printf("[%s] No new AIX events\n", time.Now().Format("15:04:05"))
+				}
+
+				if extractMetadata {
+					extractor := adapters.NewAIXFacetExtractor(database)
+					extractResult, err := extractor.ExtractFacetsFromMetadata(ctx, adapter.Name(), lastSync)
+					if err != nil {
+						fmt.Printf("[%s] AIX metadata extraction error: %v\n", time.Now().Format("15:04:05"), err)
+						return
+					}
+					if extractResult.FacetsCreated > 0 {
+						fmt.Printf("[%s] Extracted %d facets (%d segments)\n",
+							time.Now().Format("15:04:05"),
+							extractResult.FacetsCreated,
+							extractResult.SegmentsCreated,
+						)
+					} else {
+						fmt.Printf("[%s] No new AIX metadata facets\n", time.Now().Format("15:04:05"))
+					}
+				}
+			}
+
+			// Initial sync to catch up
+			fmt.Printf("[%s] Running initial sync...\n", time.Now().Format("15:04:05"))
+			runSync()
+
+			var debounceTimer *time.Timer
+			debounceDelay := time.Duration(debounceSec) * time.Second
+
+			triggerSync := func() {
+				if debounceTimer != nil {
+					debounceTimer.Stop()
+				}
+				debounceTimer = time.AfterFunc(debounceDelay, runSync)
+			}
+
+			for {
+				select {
+				case event, ok := <-watcher.Events:
+					if !ok {
+						return
+					}
+					if strings.Contains(event.Name, "aix.db") {
+						triggerSync()
+					}
+				case err, ok := <-watcher.Errors:
+					if !ok {
+						return
+					}
+					fmt.Printf("[%s] Watch error: %v\n", time.Now().Format("15:04:05"), err)
+				}
+			}
+		},
+	}
+	watchAIXCmd.Flags().String("source", "cursor", "AIX source (cursor, codex, ...)")
+	watchAIXCmd.Flags().Int("debounce-seconds", 2, "Minimum seconds between sync triggers")
+	watchAIXCmd.Flags().Bool("extract-metadata", true, "Extract facets from AIX metadata after sync")
+
+	watchCmd.AddCommand(watchRunCmd)
+	watchCmd.AddCommand(watchStatusCmd)
 	watchCmd.AddCommand(watchGmailCmd)
 	watchCmd.AddCommand(watchIMessageCmd)
+	watchCmd.AddCommand(watchAIXCmd)
 	rootCmd.AddCommand(watchCmd)
 
 	// bus command
@@ -4517,14 +4742,14 @@ Examples:
 	chunkCmd := &cobra.Command{
 		Use:   "chunk",
 		Short: "Chunk events into segments",
-		Long:  "Create segments by applying chunking strategies defined in conversation_definitions",
+		Long:  "Create segments by applying chunking strategies defined in segment_definitions",
 	}
 
 	// chunk run command
 	chunkRunCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run chunking for a definition",
-		Long:  "Apply a conversation definition's chunking strategy to create segments",
+		Long:  "Apply a segment definition's chunking strategy to create segments",
 		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
@@ -4661,10 +4886,10 @@ Examples:
 				printJSON(result)
 			} else {
 				if len(definitions) == 0 {
-					fmt.Println("No conversation definitions found")
+					fmt.Println("No segment definitions found")
 					fmt.Println("\nRun 'cortex chunk seed' to create default definitions")
 				} else {
-					fmt.Printf("Found %d conversation definition(s):\n\n", len(definitions))
+					fmt.Printf("Found %d segment definition(s):\n\n", len(definitions))
 					for _, def := range definitions {
 						channel := def.Channel
 						if channel == "" {
@@ -4687,8 +4912,8 @@ Examples:
 	// chunk seed command
 	chunkSeedCmd := &cobra.Command{
 		Use:   "seed",
-		Short: "Seed default conversation definitions",
-		Long:  "Create default conversation definitions for common chunking strategies",
+		Short: "Seed default segment definitions",
+		Long:  "Create default segment definitions for common chunking strategies",
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
 				OK      bool   `json:"ok"`
@@ -4744,12 +4969,42 @@ Examples:
 			}
 			created++
 
-			// Create cursor_session definition
-			cursorThreadConfig := chunk.ThreadConfig{}
-			_, err = chunk.CreateDefinition(ctx, database, "cursor_session", "cursor", "thread", cursorThreadConfig,
-				"Cursor sessions (one conversation per session thread)")
+			// Create single_event definition (channel-agnostic)
+			singleEventConfig := chunk.SingleEventConfig{}
+			_, err = chunk.CreateDefinition(ctx, database, "single_event", "", "single_event", singleEventConfig,
+				"Single-event segments (one event per event)")
 			if err != nil {
-				result := Result{OK: false, Message: fmt.Sprintf("Failed to create cursor_session: %v", err)}
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to create single_event: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			created++
+
+			// Create ai_session definition
+			aiThreadConfig := chunk.ThreadConfig{}
+			_, err = chunk.CreateDefinition(ctx, database, "ai_session", "cursor", "thread", aiThreadConfig,
+				"AI sessions (one segment per session thread)")
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to create ai_session: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			created++
+
+			// Create ai_turn_pair definition
+			turnPairConfig := chunk.TurnPairConfig{IncludeTools: true}
+			_, err = chunk.CreateDefinition(ctx, database, "ai_turn_pair", "cursor", "turn_pair", turnPairConfig,
+				"AI turn pairs (user + assistant responses, includes tool events)")
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to create ai_turn_pair: %v", err)}
 				if jsonOutput {
 					printJSON(result)
 				} else {
@@ -4764,10 +5019,12 @@ Examples:
 			if jsonOutput {
 				printJSON(result)
 			} else {
-				fmt.Printf("Created %d conversation definition(s):\n", created)
+				fmt.Printf("Created %d segment definition(s):\n", created)
 				fmt.Println("  - imessage_3hr (3-hour gap, thread-scoped)")
 				fmt.Println("  - gmail_thread (native Gmail threads)")
-				fmt.Println("  - cursor_session (Cursor sessions by thread)")
+				fmt.Println("  - single_event (one event per segment)")
+				fmt.Println("  - ai_session (AI sessions by thread)")
+				fmt.Println("  - ai_turn_pair (AI turn pairs, includes tools)")
 			}
 		},
 	}
@@ -5474,6 +5731,36 @@ Conversation:
 				os.Exit(1)
 			}
 
+			// Seed turn_quality_v1 analysis type
+			turnQualityPrompt := readPrompt("checkpoint-feedback-v1.prompt.md")
+			turnQualityFacetsConfig := `{
+				"mappings": [
+					{"json_path": "feedback[].sentiment", "facet_type": "turn_sentiment"},
+					{"json_path": "feedback[].correction", "facet_type": "turn_correction"},
+					{"json_path": "feedback[].frustration", "facet_type": "turn_frustration"},
+					{"json_path": "feedback[].praise", "facet_type": "turn_praise"},
+					{"json_path": "feedback[].confusion", "facet_type": "turn_confusion"},
+					{"json_path": "feedback[].acceptance", "facet_type": "turn_acceptance"},
+					{"json_path": "aggregate.quality_band", "facet_type": "turn_quality_band"},
+					{"json_path": "aggregate.quality_score", "facet_type": "turn_quality_score"},
+					{"json_path": "aggregate.correction_count", "facet_type": "turn_correction_count"},
+					{"json_path": "aggregate.frustration_count", "facet_type": "turn_frustration_count"},
+					{"json_path": "aggregate.praise_count", "facet_type": "turn_praise_count"}
+				]
+			}`
+			_, err = database.ExecContext(ctx, `
+				INSERT INTO analysis_types (id, name, version, description, output_type, facets_config_json, prompt_template, model, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(name) DO NOTHING
+			`, "turn_quality_v1", "turn_quality_v1", "1.0.0",
+				"Extract per-turn quality signals from AI feedback",
+				"structured", turnQualityFacetsConfig, turnQualityPrompt,
+				"gemini-2.0-flash", now, now)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error seeding turn_quality_v1: %v\n", err)
+				os.Exit(1)
+			}
+
 			if jsonOutput {
 				printJSON(map[string]any{"ok": true, "message": "Seeded analysis types"})
 			} else {
@@ -5487,6 +5774,7 @@ Conversation:
 				fmt.Println("  - correction_extraction_v1 (AI corrections)")
 				fmt.Println("  - relationship_context_extraction_v1 (relationship context)")
 				fmt.Println("  - workspace_pattern_extraction_v1 (workspace conventions)")
+				fmt.Println("  - turn_quality_v1 (turn-level quality signals)")
 			}
 		},
 	}
@@ -5517,7 +5805,7 @@ Examples:
 		Args: cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			type SearchResult struct {
-				ConversationID string  `json:"conversation_id"`
+				SegmentID      string  `json:"segment_id"`
 				Channel        string  `json:"channel,omitempty"`
 				ThreadID       string  `json:"thread_id,omitempty"`
 				ThreadName     string  `json:"thread_name,omitempty"`
@@ -5572,21 +5860,22 @@ Examples:
 
 			ctx := context.Background()
 
-			// Generate embedding for query
-			geminiClient := gemini.NewClient(apiKey)
+			embedder := &search.GeminiEmbedder{Client: gemini.NewClient(apiKey)}
 			model := searchModel
 			if model == "" {
 				model = "gemini-embedding-001"
 			}
 
-			queryEmbedding, err := geminiClient.EmbedContent(ctx, &gemini.EmbedContentRequest{
-				Model: model,
-				Content: gemini.Content{
-					Parts: []gemini.Part{{Text: queryText}},
-				},
+			searcher := search.NewSearcher(database, embedder)
+			resp, err := searcher.SearchSegments(ctx, search.SegmentSearchRequest{
+				Query:         queryText,
+				Channel:       searchChannel,
+				Limit:         searchLimit,
+				Model:         model,
+				UseEmbeddings: true,
 			})
 			if err != nil {
-				result := Result{OK: false, Query: queryText, Message: fmt.Sprintf("Failed to generate query embedding: %v", err)}
+				result := Result{OK: false, Query: queryText, Message: fmt.Sprintf("Failed to search segments: %v", err)}
 				if jsonOutput {
 					printJSON(result)
 				} else {
@@ -5595,101 +5884,23 @@ Examples:
 				os.Exit(1)
 			}
 
-			if queryEmbedding.Embedding == nil || len(queryEmbedding.Embedding.Values) == 0 {
-				result := Result{OK: false, Query: queryText, Message: "Empty embedding response from Gemini"}
-				if jsonOutput {
-					printJSON(result)
-				} else {
-					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
-				}
-				os.Exit(1)
-			}
-
-			// Query all conversation embeddings
-			embQuery := `
-				SELECT e.entity_id, e.embedding_blob, e.dimension,
-				       c.channel, c.thread_id, c.start_time, c.end_time, c.event_count,
-				       t.name as thread_name
-				FROM embeddings e
-				JOIN segments c ON e.entity_id = c.id
-				LEFT JOIN threads t ON c.thread_id = t.id
-				WHERE e.entity_type = 'segment' AND e.model = ?
-			`
-			embArgs := []interface{}{model}
-
-			if searchChannel != "" {
-				embQuery += ` AND c.channel = ?`
-				embArgs = append(embArgs, searchChannel)
-			}
-
-			rows, err := database.QueryContext(ctx, embQuery, embArgs...)
-			if err != nil {
-				result := Result{OK: false, Query: queryText, Message: fmt.Sprintf("Failed to query embeddings: %v", err)}
-				if jsonOutput {
-					printJSON(result)
-				} else {
-					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
-				}
-				os.Exit(1)
-			}
-			defer rows.Close()
-
-			var results []SearchResult
-
-			for rows.Next() {
-				var convID string
-				var embBlob []byte
-				var dimension int
-				var channel, threadID, threadName sql.NullString
-				var startTime, endTime int64
-				var eventCount int
-
-				if err := rows.Scan(&convID, &embBlob, &dimension, &channel, &threadID, &startTime, &endTime, &eventCount, &threadName); err != nil {
-					continue
-				}
-
-				// Convert blob to float64 slice
-				convEmbedding := blobToFloat64Slice(embBlob)
-				if len(convEmbedding) != len(queryEmbedding.Embedding.Values) {
-					continue // Dimension mismatch
-				}
-
-				// Calculate cosine similarity
-				similarity := cosineSimilarity(queryEmbedding.Embedding.Values, convEmbedding)
-
+			results := make([]SearchResult, 0, len(resp.Results))
+			for _, r := range resp.Results {
 				results = append(results, SearchResult{
-					ConversationID: convID,
-					Channel:        channel.String,
-					ThreadID:       threadID.String,
-					ThreadName:     threadName.String,
-					StartTime:      startTime,
-					EndTime:        endTime,
-					EventCount:     eventCount,
-					Similarity:     similarity,
+					SegmentID:  r.SegmentID,
+					Channel:    r.Channel,
+					ThreadID:   r.ThreadID,
+					ThreadName: r.ThreadName,
+					StartTime:  r.StartTime,
+					EndTime:    r.EndTime,
+					EventCount: r.EventCount,
+					Similarity: r.Score,
 				})
-			}
-
-			// Sort by similarity (descending)
-			for i := 0; i < len(results); i++ {
-				for j := i + 1; j < len(results); j++ {
-					if results[j].Similarity > results[i].Similarity {
-						results[i], results[j] = results[j], results[i]
-					}
-				}
-			}
-
-			// Limit results
-			limit := searchLimit
-			if limit <= 0 {
-				limit = 10
-			}
-			if len(results) > limit {
-				results = results[:limit]
 			}
 
 			// Get preview for top results
 			for i := range results {
-				preview, _ := getConversationPreview(ctx, database, results[i].ConversationID, 200)
+				preview, _ := getSegmentPreview(ctx, database, results[i].SegmentID, 200)
 				results[i].Preview = preview
 			}
 
@@ -5735,6 +5946,168 @@ Examples:
 	searchCmd.Flags().IntVar(&searchLimit, "limit", 10, "Maximum number of results")
 	searchCmd.Flags().StringVar(&searchModel, "model", "gemini-embedding-001", "Embedding model to use")
 	rootCmd.AddCommand(searchCmd)
+
+	// route command - candidate segments for routing
+	var routeChannel string
+	var routeDefinition string
+	var routeLimit int
+	var routeModel string
+	var routeMinScore float64
+
+	routeCmd := &cobra.Command{
+		Use:   "route [query]",
+		Short: "Find candidate segments for routing",
+		Long: `Find candidate segments for routing decisions.
+
+Examples:
+  cortex route "continue auth refactor"
+  cortex route "fix lint errors" --definition ai_turn_pair --limit 5`,
+		Args: cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			type RouteCandidate struct {
+				SegmentID      string  `json:"segment_id"`
+				DefinitionName string  `json:"definition_name,omitempty"`
+				Channel        string  `json:"channel,omitempty"`
+				ThreadID       string  `json:"thread_id,omitempty"`
+				ThreadName     string  `json:"thread_name,omitempty"`
+				StartTime      int64   `json:"start_time"`
+				EndTime        int64   `json:"end_time"`
+				EventCount     int     `json:"event_count"`
+				Score          float64 `json:"score"`
+				Preview        string  `json:"preview,omitempty"`
+			}
+
+			type Result struct {
+				OK         bool             `json:"ok"`
+				Query      string           `json:"query"`
+				Candidates []RouteCandidate `json:"candidates"`
+				Message    string           `json:"message,omitempty"`
+			}
+
+			queryText := strings.Join(args, " ")
+			if strings.TrimSpace(queryText) == "" {
+				result := Result{OK: false, Message: "Query is required"}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			apiKey := os.Getenv("GEMINI_API_KEY")
+			if apiKey == "" {
+				result := Result{OK: false, Query: queryText, Message: "GEMINI_API_KEY environment variable required for routing search"}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Query: queryText, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			model := routeModel
+			if strings.TrimSpace(model) == "" {
+				model = "gemini-embedding-001"
+			}
+
+			definitionName := strings.TrimSpace(routeDefinition)
+			segmentReq := search.SegmentSearchRequest{
+				Query:         queryText,
+				Channel:       routeChannel,
+				DefinitionName: definitionName,
+				Limit:         routeLimit,
+				MinScore:      routeMinScore,
+				Model:         model,
+				UseEmbeddings: true,
+			}
+
+			searcher := search.NewSearcher(database, &search.GeminiEmbedder{Client: gemini.NewClient(apiKey)})
+			resp, err := searcher.SearchSegments(cmd.Context(), segmentReq)
+			if err != nil {
+				result := Result{OK: false, Query: queryText, Message: fmt.Sprintf("Failed to search segments: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			candidates := make([]RouteCandidate, 0, len(resp.Results))
+			for _, r := range resp.Results {
+				candidates = append(candidates, RouteCandidate{
+					SegmentID:      r.SegmentID,
+					DefinitionName: r.DefinitionName,
+					Channel:        r.Channel,
+					ThreadID:       r.ThreadID,
+					ThreadName:     r.ThreadName,
+					StartTime:      r.StartTime,
+					EndTime:        r.EndTime,
+					EventCount:     r.EventCount,
+					Score:          r.Score,
+				})
+			}
+
+			for i := range candidates {
+				preview, _ := getSegmentPreview(cmd.Context(), database, candidates[i].SegmentID, 200)
+				candidates[i].Preview = preview
+			}
+
+			result := Result{
+				OK:         true,
+				Query:      queryText,
+				Candidates: candidates,
+			}
+
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Printf("Route candidates for: %q\n\n", queryText)
+				if len(candidates) == 0 {
+					fmt.Println("No matching segments found.")
+					return
+				}
+				for i, c := range candidates {
+					timeStr := time.Unix(c.StartTime, 0).Format("2006-01-02 15:04")
+					fmt.Printf("%d. [%.2f] %s", i+1, c.Score, timeStr)
+					if c.ThreadName != "" {
+						fmt.Printf(" - %s", c.ThreadName)
+					} else if c.Channel != "" {
+						fmt.Printf(" - %s", c.Channel)
+					}
+					fmt.Printf(" (%d messages)\n", c.EventCount)
+					if c.Preview != "" {
+						preview := c.Preview
+						if len(preview) > 150 {
+							preview = preview[:147] + "..."
+						}
+						fmt.Printf("   %s\n", preview)
+					}
+					fmt.Println()
+				}
+			}
+		},
+	}
+
+	routeCmd.Flags().StringVar(&routeChannel, "channel", "", "Filter by channel (imessage, gmail, cursor, etc.)")
+	routeCmd.Flags().StringVar(&routeDefinition, "definition", "ai_turn_pair", "Segment definition to route against")
+	routeCmd.Flags().IntVar(&routeLimit, "limit", 5, "Maximum number of candidates")
+	routeCmd.Flags().Float64Var(&routeMinScore, "min-score", 0.0, "Minimum similarity score")
+	routeCmd.Flags().StringVar(&routeModel, "model", "gemini-embedding-001", "Embedding model to use")
+	rootCmd.AddCommand(routeCmd)
 
 	// documents command - search document-style events
 	var docSearchChannels string
@@ -6009,7 +6382,7 @@ Examples:
 	// extract pii - extract PII from segments
 	var extractChannel string
 	var extractSince string
-	var extractConversation string
+	var extractSegment string
 	var extractPerson string
 	var extractDryRun bool
 	var extractLimit int
@@ -6023,7 +6396,7 @@ using AI analysis. Creates person_facts for identity resolution.
 
 Examples:
   cortex extract pii --channel imessage --since 30d
-  cortex extract pii --conversation <conversation_id>
+  cortex extract pii --segment <segment_id>
   cortex extract pii --person "Dad" --limit 50`,
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
@@ -6051,7 +6424,7 @@ Examples:
 				WHERE NOT EXISTS (
 					SELECT 1 FROM analysis_runs ar
 					JOIN analysis_types at ON ar.analysis_type_id = at.id
-					WHERE ar.conversation_id = c.id
+					WHERE ar.segment_id = c.id
 					AND at.name = 'pii_extraction'
 				)
 			`
@@ -6060,7 +6433,7 @@ Examples:
 			var hasDefinition bool
 
 			if extractDefinition != "" {
-				err := database.QueryRow(`SELECT id FROM conversation_definitions WHERE name = ?`, extractDefinition).Scan(&defID)
+				err := database.QueryRow(`SELECT id FROM segment_definitions WHERE name = ?`, extractDefinition).Scan(&defID)
 				if err != nil {
 					result := Result{OK: false, Message: fmt.Sprintf("Definition '%s' not found", extractDefinition)}
 					if jsonOutput {
@@ -6104,9 +6477,9 @@ Examples:
 				}
 			}
 
-			if extractConversation != "" {
+			if extractSegment != "" {
 				querySQL = `SELECT c.id FROM segments c WHERE c.id = ?`
-				queryArgs = []interface{}{extractConversation}
+				queryArgs = []interface{}{extractSegment}
 				if hasDefinition {
 					querySQL += ` AND c.definition_id = ?`
 					queryArgs = append(queryArgs, defID)
@@ -6116,14 +6489,14 @@ Examples:
 			if extractPerson != "" {
 				querySQL = `
 					SELECT DISTINCT c.id FROM segments c
-					JOIN conversation_events ce ON c.id = ce.conversation_id
+					JOIN segment_events ce ON c.id = ce.segment_id
 					JOIN event_participants ep ON ce.event_id = ep.event_id
 					JOIN persons p ON ep.person_id = p.id
 					WHERE (p.canonical_name LIKE ? OR p.display_name LIKE ?)
 					AND NOT EXISTS (
 						SELECT 1 FROM analysis_runs ar
 						JOIN analysis_types at ON ar.analysis_type_id = at.id
-						WHERE ar.conversation_id = c.id
+						WHERE ar.segment_id = c.id
 						AND at.name = 'pii_extraction'
 					)
 				`
@@ -6173,7 +6546,7 @@ Examples:
 				} else {
 					fmt.Printf("Dry run: would enqueue %d segments for PII extraction\n", len(convIDs))
 					if len(convIDs) > 0 && len(convIDs) <= 10 {
-						fmt.Println("\nConversations:")
+						fmt.Println("\nSegments:")
 						for _, id := range convIDs {
 							fmt.Printf("  %s\n", id)
 						}
@@ -6223,28 +6596,29 @@ Examples:
 	}
 	extractPIICmd.Flags().StringVar(&extractChannel, "channel", "", "Filter by channel (imessage, gmail, all)")
 	extractPIICmd.Flags().StringVar(&extractSince, "since", "", "Only process segments since (e.g., 30d, 7d, 2024-01-01)")
-	extractPIICmd.Flags().StringVar(&extractConversation, "conversation", "", "Process specific conversation ID")
+	extractPIICmd.Flags().StringVar(&extractSegment, "segment", "", "Process specific segment ID")
+	extractPIICmd.Flags().StringVar(&extractSegment, "conversation", "", "Alias for --segment")
 	extractPIICmd.Flags().StringVar(&extractPerson, "person", "", "Process segments involving specific person")
 	extractPIICmd.Flags().BoolVar(&extractDryRun, "dry-run", false, "Show what would be processed without enqueueing")
 	extractPIICmd.Flags().IntVar(&extractLimit, "limit", 0, "Limit number of segments to process")
-	extractPIICmd.Flags().StringVar(&extractDefinition, "definition", "", "Filter by conversation definition name")
+	extractPIICmd.Flags().StringVar(&extractDefinition, "definition", "", "Filter by segment definition name")
 
 	// extract nexus-cli - extract nexus CLI invocations from segments
 	var extractNexusChannel string
 	var extractNexusSince string
-	var extractNexusConversation string
+	var extractNexusSegment string
 	var extractNexusDryRun bool
 	var extractNexusLimit int
 	var extractNexusDefinition string
 
 	extractNexusCmd := &cobra.Command{
 		Use:   "nexus-cli",
-		Short: "Extract nexus CLI invocations from Cursor sessions",
-		Long: `Extract nexus CLI invocations from Cursor tool executions.
+		Short: "Extract nexus CLI invocations from AI sessions",
+	Long: `Extract nexus CLI invocations from AI tool executions.
 
 Examples:
   cortex extract nexus-cli --channel cursor --since 15d
-  cortex extract nexus-cli --definition cursor_session --since 15d`,
+  cortex extract nexus-cli --definition ai_session --since 15d`,
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
 				OK                     bool   `json:"ok"`
@@ -6270,7 +6644,7 @@ Examples:
 				WHERE NOT EXISTS (
 					SELECT 1 FROM analysis_runs ar
 					JOIN analysis_types at ON ar.analysis_type_id = at.id
-					WHERE ar.conversation_id = c.id
+					WHERE ar.segment_id = c.id
 					AND at.name = 'nexus_cli_invocations'
 				)
 			`
@@ -6279,7 +6653,7 @@ Examples:
 			var hasDefinition bool
 
 			if extractNexusDefinition != "" {
-				err := database.QueryRow(`SELECT id FROM conversation_definitions WHERE name = ?`, extractNexusDefinition).Scan(&defID)
+				err := database.QueryRow(`SELECT id FROM segment_definitions WHERE name = ?`, extractNexusDefinition).Scan(&defID)
 				if err != nil {
 					result := Result{OK: false, Message: fmt.Sprintf("Definition '%s' not found", extractNexusDefinition)}
 					if jsonOutput {
@@ -6322,9 +6696,9 @@ Examples:
 				}
 			}
 
-			if extractNexusConversation != "" {
+			if extractNexusSegment != "" {
 				querySQL = `SELECT c.id FROM segments c WHERE c.id = ?`
-				queryArgs = []interface{}{extractNexusConversation}
+				queryArgs = []interface{}{extractNexusSegment}
 				if hasDefinition {
 					querySQL += ` AND c.definition_id = ?`
 					queryArgs = append(queryArgs, defID)
@@ -6368,7 +6742,7 @@ Examples:
 				} else {
 					fmt.Printf("Dry run: would enqueue %d segments for nexus CLI extraction\n", len(convIDs))
 					if len(convIDs) > 0 && len(convIDs) <= 10 {
-						fmt.Println("\nConversations:")
+						fmt.Println("\nSegments:")
 						for _, id := range convIDs {
 							fmt.Printf("  %s\n", id)
 						}
@@ -6416,27 +6790,28 @@ Examples:
 	}
 	extractNexusCmd.Flags().StringVar(&extractNexusChannel, "channel", "", "Filter by channel (cursor, etc.)")
 	extractNexusCmd.Flags().StringVar(&extractNexusSince, "since", "", "Only process segments since (e.g., 15d, 7d, 2024-01-01)")
-	extractNexusCmd.Flags().StringVar(&extractNexusConversation, "conversation", "", "Process specific conversation ID")
+	extractNexusCmd.Flags().StringVar(&extractNexusSegment, "segment", "", "Process specific segment ID")
+	extractNexusCmd.Flags().StringVar(&extractNexusSegment, "conversation", "", "Alias for --segment")
 	extractNexusCmd.Flags().BoolVar(&extractNexusDryRun, "dry-run", false, "Show what would be processed without enqueueing")
 	extractNexusCmd.Flags().IntVar(&extractNexusLimit, "limit", 0, "Limit number of segments to process")
-	extractNexusCmd.Flags().StringVar(&extractNexusDefinition, "definition", "", "Filter by conversation definition name")
+	extractNexusCmd.Flags().StringVar(&extractNexusDefinition, "definition", "", "Filter by segment definition name")
 
 	// extract terminal - extract terminal command invocations
 	var extractTerminalChannel string
 	var extractTerminalSince string
-	var extractTerminalConversation string
+	var extractTerminalSegment string
 	var extractTerminalDryRun bool
 	var extractTerminalLimit int
 	var extractTerminalDefinition string
 
 	extractTerminalCmd := &cobra.Command{
 		Use:   "terminal",
-		Short: "Extract terminal command invocations from Cursor sessions",
-		Long: `Extract terminal command invocations from Cursor tool executions.
+	Short: "Extract terminal command invocations from AI sessions",
+	Long: `Extract terminal command invocations from AI tool executions.
 
 Examples:
   cortex extract terminal --channel cursor --since 15d
-  cortex extract terminal --definition cursor_session --since 15d`,
+  cortex extract terminal --definition ai_session --since 15d`,
 		Run: func(cmd *cobra.Command, args []string) {
 			type Result struct {
 				OK                     bool   `json:"ok"`
@@ -6462,7 +6837,7 @@ Examples:
 				WHERE NOT EXISTS (
 					SELECT 1 FROM analysis_runs ar
 					JOIN analysis_types at ON ar.analysis_type_id = at.id
-					WHERE ar.conversation_id = c.id
+					WHERE ar.segment_id = c.id
 					AND at.name = 'terminal_invocations'
 				)
 			`
@@ -6471,7 +6846,7 @@ Examples:
 			var hasDefinition bool
 
 			if extractTerminalDefinition != "" {
-				err := database.QueryRow(`SELECT id FROM conversation_definitions WHERE name = ?`, extractTerminalDefinition).Scan(&defID)
+				err := database.QueryRow(`SELECT id FROM segment_definitions WHERE name = ?`, extractTerminalDefinition).Scan(&defID)
 				if err != nil {
 					result := Result{OK: false, Message: fmt.Sprintf("Definition '%s' not found", extractTerminalDefinition)}
 					if jsonOutput {
@@ -6514,9 +6889,9 @@ Examples:
 				}
 			}
 
-			if extractTerminalConversation != "" {
+			if extractTerminalSegment != "" {
 				querySQL = `SELECT c.id FROM segments c WHERE c.id = ?`
-				queryArgs = []interface{}{extractTerminalConversation}
+				queryArgs = []interface{}{extractTerminalSegment}
 				if hasDefinition {
 					querySQL += ` AND c.definition_id = ?`
 					queryArgs = append(queryArgs, defID)
@@ -6608,10 +6983,204 @@ Examples:
 	}
 	extractTerminalCmd.Flags().StringVar(&extractTerminalChannel, "channel", "", "Filter by channel (cursor, etc.)")
 	extractTerminalCmd.Flags().StringVar(&extractTerminalSince, "since", "", "Only process segments since (e.g., 15d, 7d, 2024-01-01)")
-	extractTerminalCmd.Flags().StringVar(&extractTerminalConversation, "conversation", "", "Process specific conversation ID")
+	extractTerminalCmd.Flags().StringVar(&extractTerminalSegment, "segment", "", "Process specific segment ID")
+	extractTerminalCmd.Flags().StringVar(&extractTerminalSegment, "conversation", "", "Alias for --segment")
 	extractTerminalCmd.Flags().BoolVar(&extractTerminalDryRun, "dry-run", false, "Show what would be processed without enqueueing")
 	extractTerminalCmd.Flags().IntVar(&extractTerminalLimit, "limit", 0, "Limit number of segments to process")
-	extractTerminalCmd.Flags().StringVar(&extractTerminalDefinition, "definition", "", "Filter by conversation definition name")
+	extractTerminalCmd.Flags().StringVar(&extractTerminalDefinition, "definition", "", "Filter by segment definition name")
+
+	// extract turn-quality - extract turn-level quality signals
+	var extractTurnQualityChannel string
+	var extractTurnQualitySince string
+	var extractTurnQualitySegment string
+	var extractTurnQualityDryRun bool
+	var extractTurnQualityLimit int
+	var extractTurnQualityDefinition string
+
+	extractTurnQualityCmd := &cobra.Command{
+		Use:   "turn-quality",
+		Short: "Extract turn-level quality signals from AI turns",
+		Long: `Extract turn-level quality signals (correction, frustration, praise).
+
+Examples:
+  cortex extract turn-quality --definition ai_turn_pair --since 7d
+  cortex extract turn-quality --segment <segment_id>`,
+		Run: func(cmd *cobra.Command, args []string) {
+			type Result struct {
+				OK                     bool   `json:"ok"`
+				JobsEnqueued           int    `json:"jobs_enqueued"`
+				ConversationsToProcess int    `json:"segments_to_process,omitempty"`
+				Message                string `json:"message,omitempty"`
+			}
+
+			database, err := db.Open()
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to open database: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			querySQL := `
+				SELECT c.id FROM segments c
+				WHERE NOT EXISTS (
+					SELECT 1 FROM analysis_runs ar
+					JOIN analysis_types at ON ar.analysis_type_id = at.id
+					WHERE ar.segment_id = c.id
+					AND at.name = 'turn_quality_v1'
+				)
+			`
+			var queryArgs []interface{}
+			var defID string
+			var hasDefinition bool
+
+			if extractTurnQualityDefinition != "" {
+				err := database.QueryRow(`SELECT id FROM segment_definitions WHERE name = ?`, extractTurnQualityDefinition).Scan(&defID)
+				if err != nil {
+					result := Result{OK: false, Message: fmt.Sprintf("Definition '%s' not found", extractTurnQualityDefinition)}
+					if jsonOutput {
+						printJSON(result)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+				hasDefinition = true
+				querySQL += ` AND c.definition_id = ?`
+				queryArgs = append(queryArgs, defID)
+			}
+
+			if extractTurnQualityChannel != "" {
+				querySQL += ` AND c.channel = ?`
+				queryArgs = append(queryArgs, extractTurnQualityChannel)
+			}
+
+			if extractTurnQualitySince != "" {
+				var sinceTime time.Time
+				if strings.HasSuffix(extractTurnQualitySince, "d") {
+					var d int
+					fmt.Sscanf(extractTurnQualitySince, "%dd", &d)
+					if d > 0 {
+						sinceTime = time.Now().AddDate(0, 0, -d)
+					}
+				} else if strings.HasSuffix(extractTurnQualitySince, "h") {
+					var h int
+					fmt.Sscanf(extractTurnQualitySince, "%dh", &h)
+					if h > 0 {
+						sinceTime = time.Now().Add(-time.Duration(h) * time.Hour)
+					}
+				} else {
+					sinceTime, _ = time.Parse("2006-01-02", extractTurnQualitySince)
+				}
+				if !sinceTime.IsZero() {
+					querySQL += ` AND c.start_time >= ?`
+					queryArgs = append(queryArgs, sinceTime.Unix())
+				}
+			}
+
+			if extractTurnQualitySegment != "" {
+				querySQL = `SELECT c.id FROM segments c WHERE c.id = ?`
+				queryArgs = []interface{}{extractTurnQualitySegment}
+				if hasDefinition {
+					querySQL += ` AND c.definition_id = ?`
+					queryArgs = append(queryArgs, defID)
+				}
+			}
+
+			querySQL += ` ORDER BY c.start_time DESC`
+			if extractTurnQualityLimit > 0 {
+				querySQL += fmt.Sprintf(` LIMIT %d`, extractTurnQualityLimit)
+			}
+
+			rows, err := database.Query(querySQL, queryArgs...)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to query segments: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			var convIDs []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					continue
+				}
+				convIDs = append(convIDs, id)
+			}
+			rows.Close()
+
+			if extractTurnQualityDryRun {
+				result := Result{
+					OK:                     true,
+					ConversationsToProcess: len(convIDs),
+					Message:                fmt.Sprintf("Would enqueue %d segments for turn-quality extraction", len(convIDs)),
+				}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Printf("Dry run: would enqueue %d segments for turn-quality extraction\n", len(convIDs))
+					if len(convIDs) > 0 && len(convIDs) <= 10 {
+						fmt.Println("\nSegments:")
+						for _, id := range convIDs {
+							fmt.Printf("  %s\n", id)
+						}
+					}
+				}
+				return
+			}
+
+			geminiClient := gemini.NewClient("")
+			engine, err := compute.NewEngine(database, geminiClient, compute.DefaultConfig())
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to create compute engine: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			ctx := context.Background()
+			count, err := engine.EnqueueAnalysis(ctx, "turn_quality_v1", convIDs...)
+			if err != nil {
+				result := Result{OK: false, Message: fmt.Sprintf("Failed to enqueue analysis: %v", err)}
+				if jsonOutput {
+					printJSON(result)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", result.Message)
+				}
+				os.Exit(1)
+			}
+
+			result := Result{
+				OK:           true,
+				JobsEnqueued: count,
+				Message:      fmt.Sprintf("Enqueued %d turn-quality extraction jobs", count),
+			}
+			if jsonOutput {
+				printJSON(result)
+			} else {
+				fmt.Printf("✓ Enqueued %d turn-quality extraction jobs\n", count)
+				fmt.Println("\nRun 'cortex compute run' to process the queue")
+			}
+		},
+	}
+	extractTurnQualityCmd.Flags().StringVar(&extractTurnQualityChannel, "channel", "", "Filter by channel (cursor, etc.)")
+	extractTurnQualityCmd.Flags().StringVar(&extractTurnQualitySince, "since", "", "Only process segments since (e.g., 7d, 2024-01-01)")
+	extractTurnQualityCmd.Flags().StringVar(&extractTurnQualitySegment, "segment", "", "Process specific segment ID")
+	extractTurnQualityCmd.Flags().StringVar(&extractTurnQualitySegment, "conversation", "", "Alias for --segment")
+	extractTurnQualityCmd.Flags().BoolVar(&extractTurnQualityDryRun, "dry-run", false, "Show what would be processed without enqueueing")
+	extractTurnQualityCmd.Flags().IntVar(&extractTurnQualityLimit, "limit", 0, "Limit number of segments to process")
+	extractTurnQualityCmd.Flags().StringVar(&extractTurnQualityDefinition, "definition", "ai_turn_pair", "Filter by segment definition name")
 
 	// extract sync - sync facets to person_facts
 	extractSyncCmd := &cobra.Command{
@@ -6868,6 +7437,7 @@ Examples:
 	extractCmd.AddCommand(extractPIICmd)
 	extractCmd.AddCommand(extractNexusCmd)
 	extractCmd.AddCommand(extractTerminalCmd)
+	extractCmd.AddCommand(extractTurnQualityCmd)
 	extractCmd.AddCommand(extractSyncCmd)
 	extractCmd.AddCommand(extractStatusCmd)
 	extractCmd.AddCommand(extractAIXMetadataCmd)
@@ -6993,18 +7563,18 @@ func cosineSimilarity(a, b []float64) float64 {
 	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
-// getConversationPreview returns a text preview of a conversation
-func getConversationPreview(ctx context.Context, database *sql.DB, convID string, maxLen int) (string, error) {
+// getSegmentPreview returns a text preview of a segment
+func getSegmentPreview(ctx context.Context, database *sql.DB, segmentID string, maxLen int) (string, error) {
 	rows, err := database.QueryContext(ctx, `
 		SELECT e.content, p.canonical_name
-		FROM conversation_events ce
-		JOIN events e ON ce.event_id = e.id
+		FROM segment_events se
+		JOIN events e ON se.event_id = e.id
 		LEFT JOIN event_participants ep ON e.id = ep.event_id AND ep.role = 'sender'
 		LEFT JOIN persons p ON ep.person_id = p.id
-		WHERE ce.conversation_id = ?
-		ORDER BY ce.position
+		WHERE se.segment_id = ?
+		ORDER BY se.position
 		LIMIT 5
-	`, convID)
+	`, segmentID)
 	if err != nil {
 		return "", err
 	}
