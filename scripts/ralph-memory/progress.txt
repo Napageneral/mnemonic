@@ -396,3 +396,38 @@
 - Identity relationships (HAS_EMAIL, etc.) should be filtered out before EdgeResolver (handled by IdentityPromoter)
 - Different phrasings of the same fact are preserved in mentions for debugging/review
 
+### SQLite Concurrent Query Limitation
+- SQLite doesn't support multiple active result sets on the same connection
+- When iterating with `rows.Next()`, you CANNOT execute another query until `rows.Close()`
+- Solution: collect all row data into a slice first, close rows, then process
+- Error symptom: "no such table" or other confusing errors when table definitely exists
+
+---
+## 2026-01-21 - [MS-016] Implement contradiction detection
+- Created ContradictionDetector that finds and invalidates contradicted facts
+- Exclusive relationship types defined: WORKS_AT, LIVES_IN, SPOUSE_OF, MARRIED_TO, DATING
+- For exclusive types: new relationship to different target invalidates old relationship
+- invalid_at is set to new relationship's valid_at (if available) or episode timestamp
+- Old relationships are retained with invalid_at set (audit trail preserved)
+- Added IsExclusiveRelationType helper for checking relationship types
+- Added GetContradictingRelationships for preview/dry-run scenarios
+
+**Files changed:**
+- `internal/memory/contradiction_detector.go` - ContradictionDetector implementation
+- `internal/memory/contradiction_detector_test.go` - 13 unit tests for all scenarios
+
+**Learnings:**
+- SQLite concurrent query limitation was the root cause of mysterious "no such table" errors
+- Must close `rows` before executing another query on the same connection
+- Contradiction detection only applies to "exclusive" relationship types (one-at-a-time)
+- Non-exclusive types like KNOWS, FRIEND_OF can have multiple concurrent instances
+- Using new relationship's valid_at as old relationship's invalid_at creates a clean timeline
+- Fallback to episode timestamp when valid_at is not explicit
+
+### Contradiction Detection Pattern
+- Only exclusive relationship types trigger contradiction detection (WORKS_AT, LIVES_IN, etc.)
+- Same target = no contradiction (reaffirming existing fact)
+- Different target = contradiction (old fact invalidated)
+- Already-invalidated relationships (invalid_at IS NOT NULL) are skipped
+- Must collect row IDs before closing result set, then process updates
+
