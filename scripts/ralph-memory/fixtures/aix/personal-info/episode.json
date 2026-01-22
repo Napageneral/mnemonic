@@ -1,0 +1,38 @@
+{
+  "id": "fixture-aix-personal-001",
+  "source": "aix",
+  "channel": "cursor",
+  "thread_id": "aix_session_personal_context",
+  "reference_time": "2026-01-18T11:00:00Z",
+  "events": [
+    {
+      "id": "evt-001",
+      "timestamp": "2026-01-18T10:55:00Z",
+      "sender": "Tyler",
+      "sender_identifier": "user",
+      "content": "I need you to help me set up my development environment. Some context about me: I was born on August 15, 1990, I grew up in Wisconsin but moved to Austin in 2023, and I currently work at Anthropic as a software engineer.",
+      "direction": "outbound"
+    },
+    {
+      "id": "evt-002",
+      "timestamp": "2026-01-18T10:56:00Z",
+      "sender": "Claude",
+      "sender_identifier": "assistant",
+      "content": "I'd be happy to help you set up your development environment. Given that you're at Anthropic, I'm guessing you might need Python, TypeScript, and possibly some ML-related tooling. What specific aspects of the setup do you need help with?",
+      "direction": "inbound"
+    },
+    {
+      "id": "evt-003",
+      "timestamp": "2026-01-18T11:00:00Z",
+      "sender": "Tyler",
+      "sender_identifier": "user",
+      "content": "Let's start with the basics - Python environment with pyenv and a good TypeScript setup.",
+      "direction": "outbound"
+    }
+  ],
+  "metadata": {
+    "description": "User shares personal context while asking for development help",
+    "coverage_tags": ["personal_info", "birthdate", "location", "job", "temporal_literals", "self_disclosed", "aix"],
+    "notes": "Tests: Person entity, Company entity (Anthropic), Location entity (Austin, Wisconsin), BORN_ON with date literal, LIVES_IN with temporal (2023), WORKS_AT relationship"
+  }
+}

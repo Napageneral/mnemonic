@@ -1,0 +1,32 @@
+{
+  "id": "fixture-gmail-workthread-001",
+  "source": "gmail",
+  "channel": "email",
+  "thread_id": "thread_meeting_proposal",
+  "reference_time": "2026-01-08T15:30:00Z",
+  "events": [
+    {
+      "id": "evt-001",
+      "timestamp": "2026-01-08T14:00:00Z",
+      "sender": "Jeff Martinez",
+      "sender_identifier": "jeff.martinez@cleardata.com",
+      "content": "Subject: Re: Proposal Meeting\n\nHi Tyler,\n\nFollowing up on our call - I'd like to schedule a meeting with you and Vlad to discuss the partnership proposal.\n\nCan we do Thursday at 2pm? I'll send a calendar invite once confirmed.\n\nBest,\nJeff Martinez\nSenior VP of Partnerships\nCLEAR Data Solutions\njeff.martinez@cleardata.com\n+1-512-555-9876",
+      "direction": "inbound",
+      "subject": "Re: Proposal Meeting"
+    },
+    {
+      "id": "evt-002",
+      "timestamp": "2026-01-08T15:30:00Z",
+      "sender": "Tyler",
+      "sender_identifier": "tyler@intent-systems.com",
+      "content": "Subject: Re: Proposal Meeting\n\nHi Jeff,\n\nThursday at 2pm works for me. I'll loop in Vlad.\n\nTyler",
+      "direction": "outbound",
+      "subject": "Re: Proposal Meeting"
+    }
+  ],
+  "metadata": {
+    "description": "Work email thread discussing a meeting with colleague and external partner",
+    "coverage_tags": ["work_thread", "colleague", "email_signature", "identity", "company", "self_disclosed"],
+    "notes": "Tests: Person entities from email thread, Company extraction (CLEAR Data Solutions), WORKS_AT relationship, email signature parsing for identity (phone, email), role/title extraction"
+  }
+}

@@ -10,20 +10,29 @@ These fixtures use **real data** from Tyler's communication sources (iMessage, G
 fixtures/
 ├── README.md                    # This file
 ├── imessage/
-│   ├── identity-disclosure/     # Someone shares their email/phone
+│   ├── identity-disclosure/     # Casey shares email (HAS_EMAIL → alias)
 │   │   ├── episode.json
 │   │   └── expectations.yaml
-│   ├── job-change/              # Employment change with temporal bounds
-│   ├── social-relationship/     # Dating/spouse/friend relationships
-│   └── shared-identifier/       # Family phone number scenario
+│   ├── job-change/              # Tyler announces job change (valid_at/invalid_at)
+│   │   ├── episode.json
+│   │   └── expectations.yaml
+│   └── social-relationship/     # Group chat with DATING relationship
+│       ├── episode.json
+│       └── expectations.yaml
 ├── gmail/
-│   ├── newsletter-sender/       # Company identity from emails
-│   ├── work-thread/             # Colleague relationships
-│   └── event-invitation/        # Calendar event extraction
+│   ├── newsletter-sender/       # Cloudflare invoice (Company, CUSTOMER_OF)
+│   │   ├── episode.json
+│   │   └── expectations.yaml
+│   └── work-thread/             # Work email with signature parsing
+│       ├── episode.json
+│       └── expectations.yaml
 └── aix/
-    ├── personal-info/           # User shares personal details
-    ├── project-discussion/      # Project entity extraction
-    └── multi-person/            # Multiple people mentioned
+    ├── personal-info/           # User shares birthdate, location, employer
+    │   ├── episode.json
+    │   └── expectations.yaml
+    └── project-discussion/      # Project entities (Nexus, Cortex)
+        ├── episode.json
+        └── expectations.yaml
 ```
 
 ## Fixture Format
@@ -96,11 +105,22 @@ Each fixture should test specific behaviors. Track coverage here:
 |---------|--------------|-------------------|------------|----------|----------|
 | imessage/identity-disclosure | Person | HAS_EMAIL | new entity | - | ✓ promote |
 | imessage/job-change | Person, Company | WORKS_AT | resolve existing | valid_at, invalid_at | - |
-| imessage/social-relationship | Person, Person | DATING, SPOUSE_OF | - | valid_at | - |
-| gmail/newsletter-sender | Company | - | new entity | - | - |
-| gmail/work-thread | Person, Company | WORKS_AT | resolve | - | - |
-| aix/personal-info | Person, Location | BORN_ON, LIVES_IN | - | target_literal date | - |
-| aix/project-discussion | Person, Project | BUILDING, WORKING_ON | - | - | - |
+| imessage/social-relationship | Person (4) | DATING | new entities | valid_at (6mo) | - |
+| gmail/newsletter-sender | Company (2) | CUSTOMER_OF | new entities | - | - |
+| gmail/work-thread | Person (3), Company | WORKS_AT | resolve | - | ✓ signature |
+| aix/personal-info | Person, Company, Location | BORN_ON, LIVES_IN, WORKS_AT | - | date literal, valid_at | - |
+| aix/project-discussion | Person (2), Project | BUILDING, WORKING_ON | - | STARTED_ON | - |
+
+### Feature Coverage Summary
+
+- **Identity Promotion**: imessage/identity-disclosure, gmail/work-thread (signature)
+- **Temporal Literals**: aix/personal-info (BORN_ON), aix/project-discussion (STARTED_ON)
+- **Temporal Bounds**: imessage/job-change (valid_at/invalid_at), aix/personal-info (valid_at)
+- **Contradiction Detection**: imessage/job-change (old job invalidated)
+- **Multi-Entity**: imessage/social-relationship (4 people), gmail/work-thread (3 people)
+- **Company Extraction**: gmail/newsletter-sender, gmail/work-thread, aix/personal-info
+- **Project Extraction**: aix/project-discussion
+- **Location Extraction**: aix/personal-info
 
 ## How to Select Real Data
 

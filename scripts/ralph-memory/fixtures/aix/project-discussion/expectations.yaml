@@ -1,0 +1,93 @@
+# Fixture: Project discussion in AI chat
+description: "User discusses their personal projects Nexus and Cortex"
+
+entities:
+  must_have:
+    - name_contains: "Tyler"
+      entity_type: Person
+
+    - name_contains: "Casey"
+      entity_type: Person
+
+    - name_contains: "Nexus"
+      entity_type: Project
+
+  optional:
+    # Cortex might be extracted as a separate project
+    - name_contains: "Cortex"
+      entity_type: Project
+
+    # Anthropic might be mentioned in context
+    - name_contains: "Anthropic"
+      entity_type: Company
+
+    # Document reference might become a Document entity
+    - name_contains: "MEMORY_SYSTEM_SPEC"
+      entity_type: Document
+
+  must_not_have:
+    # Claude (AI) should NOT be an entity
+    - name: "Claude"
+      entity_type: Person
+
+    - name: "Claude"
+      entity_type: any
+
+    # Technologies should not be entities
+    - name: "Go"
+      entity_type: any
+
+    - name: "SQLite"
+      entity_type: any
+
+    - name: "Gemini"
+      entity_type: any
+
+relationships:
+  must_have:
+    # Tyler is building Nexus
+    - source_entity_name_contains: "Tyler"
+      relation_type: BUILDING
+      target_entity_name_contains: "Nexus"
+
+  optional:
+    # Tyler working on Nexus (alternative phrasing)
+    - source_entity_name_contains: "Tyler"
+      relation_type: WORKING_ON
+      target_entity_name_contains: "Nexus"
+
+    # Nexus started in January 2025
+    - source_entity_name_contains: "Nexus"
+      relation_type: STARTED_ON
+      target_literal_like: "2025-01%"
+
+    # Casey helps test / collaborates
+    - source_entity_name_contains: "Casey"
+      relation_type: TESTING
+
+    - source_entity_name_contains: "Casey"
+      relation_type: COLLABORATES_ON
+      target_entity_name_contains: "Nexus"
+
+    # Cortex is part of Nexus
+    - source_entity_name_contains: "Cortex"
+      relation_type: PART_OF
+      target_entity_name_contains: "Nexus"
+
+aliases:
+  must_not_have:
+    # No identity info disclosed in this episode
+    - alias_type: email
+    - alias_type: phone
+
+episode_entity_mentions:
+  must_have:
+    - entity_name_contains: "Tyler"
+    - entity_name_contains: "Nexus"
+    - entity_name_contains: "Casey"
+
+episode_relationship_mentions:
+  must_have:
+    # Project building relationship
+    - extracted_fact_contains: "Nexus"
+      source_type: self_disclosed

@@ -1,0 +1,52 @@
+# Fixture: Sarah mentions boyfriend David in group chat
+description: "Group chat mentions dating relationship and third-party entity"
+
+entities:
+  must_have:
+    - name_contains: "Tyler"
+      entity_type: Person
+
+    - name_contains: "Sarah"
+      entity_type: Person
+
+    - name_contains: "Mike"
+      entity_type: Person
+
+    - name_contains: "David"
+      entity_type: Person
+
+  must_not_have:
+    # Locations like "Oak St" should not become entities in this context
+    # (mentioned in passing, not significant)
+    - name: "BBQ"
+      entity_type: any
+
+relationships:
+  must_have:
+    # Sarah is dating David
+    - source_entity_name_contains: "Sarah"
+      relation_type: DATING
+      target_entity_name_contains: "David"
+      # valid_at should be approximately 6 months ago from reference_time
+      # reference_time is 2026-01-20, so valid_at ~2025-07
+      source_type: self_disclosed
+
+  optional:
+    # David lives at/owns the house on Oak St - might or might not extract
+    - source_entity_name_contains: "David"
+      relation_type: LIVES_AT
+
+    # Friendship relationships are implicit but may be extracted
+    - relation_type: KNOWS
+
+episode_entity_mentions:
+  must_have:
+    - entity_name_contains: "Tyler"
+    - entity_name_contains: "Sarah"
+    - entity_name_contains: "Mike"
+    - entity_name_contains: "David"
+
+episode_relationship_mentions:
+  must_have:
+    - extracted_fact_contains: "boyfriend"
+      source_type: self_disclosed

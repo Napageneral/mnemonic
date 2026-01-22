@@ -1,0 +1,46 @@
+{
+  "id": "fixture-aix-project-001",
+  "source": "aix",
+  "channel": "cursor",
+  "thread_id": "aix_session_project_nexus",
+  "reference_time": "2026-01-19T16:30:00Z",
+  "events": [
+    {
+      "id": "evt-001",
+      "timestamp": "2026-01-19T16:20:00Z",
+      "sender": "Tyler",
+      "sender_identifier": "user",
+      "content": "I started working on Nexus back in January 2025. It's my personal knowledge management system that I've been building alongside my work at Anthropic. Casey has been helping me test it.",
+      "direction": "outbound"
+    },
+    {
+      "id": "evt-002",
+      "timestamp": "2026-01-19T16:22:00Z",
+      "sender": "Claude",
+      "sender_identifier": "assistant",
+      "content": "That's a cool project! A personal knowledge management system sounds useful. What's the tech stack?",
+      "direction": "inbound"
+    },
+    {
+      "id": "evt-003",
+      "timestamp": "2026-01-19T16:25:00Z",
+      "sender": "Tyler",
+      "sender_identifier": "user",
+      "content": "It's built with Go for the backend, SQLite for storage, and I'm using the Gemini API for embeddings and extraction. The project also includes Cortex, which is the core memory engine.",
+      "direction": "outbound"
+    },
+    {
+      "id": "evt-004",
+      "timestamp": "2026-01-19T16:30:00Z",
+      "sender": "Tyler",
+      "sender_identifier": "user",
+      "content": "I've been documenting everything in a spec file at docs/MEMORY_SYSTEM_SPEC.md. Can you help me review the entity resolution algorithm?",
+      "direction": "outbound"
+    }
+  ],
+  "metadata": {
+    "description": "User discusses their personal project Nexus and its subcomponent Cortex",
+    "coverage_tags": ["project", "building", "ownership", "collaboration", "document_reference", "aix"],
+    "notes": "Tests: Project entity (Nexus, Cortex), BUILDING/WORKING_ON relationships, STARTED_ON temporal literal, collaboration (Casey testing), Document reference"
+  }
+}

@@ -1,0 +1,86 @@
+# Fixture: User shares personal info in AI chat
+description: "Personal context shared during AI coding session"
+
+entities:
+  must_have:
+    - name_contains: "Tyler"
+      entity_type: Person
+
+    - name_contains: "Anthropic"
+      entity_type: Company
+
+    - name_contains: "Austin"
+      entity_type: Location
+
+  optional:
+    # Wisconsin might be extracted as origin location
+    - name_contains: "Wisconsin"
+      entity_type: Location
+
+  must_not_have:
+    # Claude (AI assistant) should NOT be an entity - no durable identity
+    - name: "Claude"
+      entity_type: Person
+
+    - name: "Claude"
+      entity_type: any
+
+    # Dates should NOT be entities - they're target_literals
+    - name: "1990"
+      entity_type: any
+
+    - name: "August 15"
+      entity_type: any
+
+relationships:
+  must_have:
+    # Tyler's birthdate as target_literal
+    - source_entity_name_contains: "Tyler"
+      relation_type: BORN_ON
+      target_literal_like: "1990-08-15%"
+
+    # Tyler lives in Austin
+    - source_entity_name_contains: "Tyler"
+      relation_type: LIVES_IN
+      target_entity_name_contains: "Austin"
+      # valid_at should be 2023
+      valid_at_like: "2023%"
+
+    # Tyler works at Anthropic
+    - source_entity_name_contains: "Tyler"
+      relation_type: WORKS_AT
+      target_entity_name_contains: "Anthropic"
+
+  optional:
+    # Tyler grew up in / from Wisconsin
+    - source_entity_name_contains: "Tyler"
+      relation_type: FROM
+      target_entity_name_contains: "Wisconsin"
+
+    # Tyler has role software engineer
+    - source_entity_name_contains: "Tyler"
+      relation_type: HAS_ROLE
+
+aliases:
+  must_not_have:
+    # AI assistant messages should not create aliases
+    - alias_type: email
+      entity_name_contains: "Claude"
+
+episode_entity_mentions:
+  must_have:
+    - entity_name_contains: "Tyler"
+    - entity_name_contains: "Anthropic"
+    - entity_name_contains: "Austin"
+
+episode_relationship_mentions:
+  must_have:
+    # All relationships should be self_disclosed (Tyler said them about himself)
+    - extracted_fact_contains: "born"
+      source_type: self_disclosed
+
+    - extracted_fact_contains: "Austin"
+      source_type: self_disclosed
+
+    - extracted_fact_contains: "Anthropic"
+      source_type: self_disclosed

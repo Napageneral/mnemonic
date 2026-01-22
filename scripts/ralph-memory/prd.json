@@ -325,8 +325,8 @@
         "README.md in fixtures/ explains format"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": "See MEMORY_SYSTEM_SPEC.md Part 11. Real data for vibe checking."
+      "passes": true,
+      "notes": "See MEMORY_SYSTEM_SPEC.md Part 11. Completed: 7 fixtures total (3 iMessage, 2 Gmail, 2 AIX) covering identity promotion, temporal bounds, contradiction detection, multi-entity extraction, and project relationships."
     },
     {
       "id": "MS-022",

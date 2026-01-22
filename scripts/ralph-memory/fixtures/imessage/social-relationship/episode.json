@@ -1,0 +1,46 @@
+{
+  "id": "fixture-imessage-social-001",
+  "source": "imessage",
+  "channel": "imessage",
+  "thread_id": "chat_group_friends",
+  "reference_time": "2026-01-20T19:30:00Z",
+  "events": [
+    {
+      "id": "evt-001",
+      "timestamp": "2026-01-20T19:25:00Z",
+      "sender": "Tyler",
+      "sender_identifier": "+1-707-287-6731",
+      "content": "Anyone want to come over for dinner Saturday?",
+      "direction": "outbound"
+    },
+    {
+      "id": "evt-002",
+      "timestamp": "2026-01-20T19:27:00Z",
+      "sender": "Sarah Chen",
+      "sender_identifier": "+1-512-555-8842",
+      "content": "My boyfriend's house has a yard so we could do a BBQ there instead!",
+      "direction": "inbound"
+    },
+    {
+      "id": "evt-003",
+      "timestamp": "2026-01-20T19:28:00Z",
+      "sender": "Mike",
+      "sender_identifier": "+1-408-555-1234",
+      "content": "Sounds good! Is that David's place?",
+      "direction": "inbound"
+    },
+    {
+      "id": "evt-004",
+      "timestamp": "2026-01-20T19:30:00Z",
+      "sender": "Sarah Chen",
+      "sender_identifier": "+1-512-555-8842",
+      "content": "Yeah David's place on Oak St. We've been together about 6 months now",
+      "direction": "inbound"
+    }
+  ],
+  "metadata": {
+    "description": "Group chat where Sarah mentions her boyfriend David and their relationship duration",
+    "coverage_tags": ["social_relationship", "dating", "group_chat", "third_party_mention"],
+    "notes": "Tests: DATING relationship extraction, third-party entity (David), temporal context (6 months), group chat multi-entity"
+  }
+}

@@ -587,3 +587,52 @@
 - QueryDirection enum (string type) is more readable than bool flags
 - LEFT JOIN needed when target can be either entity_id or literal
 
+---
+## 2026-01-22 - [MS-021] Create verification fixtures from real data
+- Created 7 verification fixtures across 3 sources (iMessage, Gmail, AIX)
+- iMessage fixtures:
+  - identity-disclosure: Casey shares email (identity promotion, HAS_EMAIL → alias)
+  - job-change: Tyler announces job change (valid_at/invalid_at, contradiction detection)
+  - social-relationship: Group chat with DATING relationship (multi-entity, temporal)
+- Gmail fixtures:
+  - newsletter-sender: Cloudflare invoice (Company entity, CUSTOMER_OF relationship)
+  - work-thread: Email with signature (identity extraction, phone/email from signature)
+- AIX fixtures:
+  - personal-info: User shares birthdate, location, employer (BORN_ON literal, LIVES_IN, WORKS_AT)
+  - project-discussion: Project entities Nexus/Cortex (BUILDING relationship, STARTED_ON)
+- Each fixture has episode.json (input) and expectations.yaml (assertions)
+- Updated README.md coverage matrix to reflect actual fixtures
+
+**Files created:**
+- `scripts/ralph-memory/fixtures/imessage/social-relationship/episode.json`
+- `scripts/ralph-memory/fixtures/imessage/social-relationship/expectations.yaml`
+- `scripts/ralph-memory/fixtures/gmail/newsletter-sender/episode.json`
+- `scripts/ralph-memory/fixtures/gmail/newsletter-sender/expectations.yaml`
+- `scripts/ralph-memory/fixtures/gmail/work-thread/episode.json`
+- `scripts/ralph-memory/fixtures/gmail/work-thread/expectations.yaml`
+- `scripts/ralph-memory/fixtures/aix/personal-info/episode.json`
+- `scripts/ralph-memory/fixtures/aix/personal-info/expectations.yaml`
+- `scripts/ralph-memory/fixtures/aix/project-discussion/episode.json`
+- `scripts/ralph-memory/fixtures/aix/project-discussion/expectations.yaml`
+
+**Files updated:**
+- `scripts/ralph-memory/fixtures/README.md` - Updated directory structure and coverage matrix
+
+**Learnings:**
+- Fixture format follows spec §11.1: episode.json for input, expectations.yaml for assertions
+- expectations.yaml supports must_have, must_not_have, and optional sections for flexible matching
+- Coverage matrix helps track which features each fixture tests
+- AI assistants (Claude) should NOT become entities per spec - no durable identity
+- Dates, technologies, and other non-entity concepts use target_literal or are simply not extracted
+- Email signatures are valuable for identity extraction (phone, email, role)
+- Automated/newsletter emails should extract Company entities but NOT Person entities for the sender
+
+### Fixture Design Pattern
+- episode.json contains: id, source, channel, thread_id, reference_time, events array, metadata
+- events have: id, timestamp, sender, sender_identifier, content, direction
+- metadata includes: description, coverage_tags (for filtering), notes (test focus)
+- expectations.yaml sections: entities, relationships, aliases, episode_entity_mentions, episode_relationship_mentions
+- Use name_contains/entity_name_contains for flexible matching (not exact names)
+- Use *_like patterns for temporal matching (e.g., "2025-12%")
+- optional section for things that might or might not be extracted (LLM variance)
+
