@@ -431,3 +431,40 @@
 - Already-invalidated relationships (invalid_at IS NOT NULL) are skipped
 - Must collect row IDs before closing result set, then process updates
 
+### Collision Detection Pattern
+- O(F) algorithm: iterate facts (aliases, relationships), not entity pairs
+- Hard identifier types: email, phone, handle - 0.95 confidence, auto_eligible=true
+- Multiple hard identifiers matching same pair → upgrade to 0.99 confidence
+- Compound matching: name + birthdate (0.90), name + employer (0.85)
+- CRITICAL: Shared aliases (is_shared=TRUE) do NOT trigger collisions - they're intentional
+- Merged entities (merged_into IS NOT NULL) excluded from all collision queries
+- Invalidated relationships (invalid_at IS NOT NULL) excluded from compound matching
+- merge_candidates stores: reason, confidence, matching_facts JSON, context JSON
+- DetectCollisionsForEntity() enables incremental detection after entity resolution
+
+---
+## 2026-01-21 - [MS-017] Implement collision detection for merge candidates
+- Created CollisionDetector that implements O(F) collision detection algorithm
+- Phase 1: Hard identifier collisions (email, phone, handle) with is_shared=FALSE filter
+- Phase 2: Compound matching (name + birthdate, name + employer) via SQL JOINs
+- Upgrade logic: pairs with multiple hard identifier matches → 0.99 confidence
+- Deduplication: same entity pair from multiple sources → keep highest confidence
+- Creates/updates merge_candidates with matching_facts and context JSON
+- Added helper methods: GetPendingMergeCandidates, GetAutoEligibleCandidates
+- Added incremental detection: DetectCollisionsForEntity for single-entity queries
+
+**Files changed:**
+- `internal/memory/collision_detector.go` - CollisionDetector implementation with O(F) algorithm
+- `internal/memory/collision_detector_test.go` - 15 unit tests covering all scenarios
+- `AGENTS.md` - Added collision detection patterns
+
+**Learnings:**
+- GROUP_CONCAT in SQLite aggregates entity IDs for shared alias detection
+- SQLite's GROUP BY ... HAVING COUNT > 1 enables efficient collision detection
+- Conditional JOINs (ea1.entity_id < ea2.entity_id) prevent duplicate pairs
+- UNIQUE(entity_a_id, entity_b_id) in merge_candidates requires consistent ordering
+- pairKey() helper ensures consistent (a, b) ordering regardless of input order
+- Shared alias exclusion (is_shared=FALSE) is critical for avoiding false positives on family phones
+- Compound match queries must JOIN relationships table for BORN_ON/WORKS_AT
+- Entity-specific detection uses same patterns but with WHERE ea1.entity_id = ?
+

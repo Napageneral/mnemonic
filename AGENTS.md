@@ -374,6 +374,15 @@ cortex chunk run imessage_3hr --json
 - Identity provenance: always create episode_relationship_mentions (with target_literal+alias_id), even for non-self_disclosed
 - Identity relationships do NOT create rows in relationships table - they go to entity_aliases instead
 - IdentityPromoter.Promote() returns NonIdentityRels for EdgeResolver to handle (separation of concerns)
+- Collision detection: CollisionDetector implements O(F) algorithm - iterate facts, not entity pairs
+- Hard identifier collisions: email, phone, handle matches with is_shared=FALSE → 0.95 confidence, auto_eligible=true
+- Multiple hard identifier match: same pair matches on 2+ identifiers → upgraded to 0.99 confidence
+- Compound matching: name + birthdate (0.90 auto_eligible), name + employer (0.85 manual review)
+- Shared aliases (is_shared=TRUE) do NOT trigger merge_candidates - they're intentional (family phone, team email)
+- Merged entities (merged_into IS NOT NULL) excluded from collision detection queries
+- Invalidated relationships (invalid_at IS NOT NULL) excluded from compound matching
+- CollisionDetector.DetectCollisionsForEntity() for incremental detection after entity resolution
+- merge_candidates created with reason, confidence, matching_facts JSON, context JSON
 
 ## Schema Quick Reference
 
