@@ -2,101 +2,118 @@
 
 These prompts are adapted from [Graphiti](https://github.com/getzep/graphiti), Zep's open-source temporal knowledge graph framework.
 
-## Pipeline Sequence
+## Pipeline Overview
 
-The Graphiti extraction pipeline runs in this order:
+The extraction pipeline uses **split prompts** (Graphiti-style) for better accuracy:
 
 ```
-1. EXTRACT ENTITIES (extract-entities-*.prompt.md)
-   └─ Identify people, places, things from episode content
+1. EXTRACT ENTITIES (extract-entities.prompt.md)
+   └─ Graph-independent: extract entities from episode content
+   └─ Output: [{name, entity_type_id}, ...]
    
-2. REFLEXION - ENTITIES (reflexion-entities.prompt.md)
-   └─ Self-check: did we miss any entities?
-
-3. RESOLVE ENTITIES (resolve-entities.prompt.md)
+2. RESOLVE ENTITIES (code + optional LLM)
    └─ Match extracted entities to existing nodes (deduplication)
+   └─ Uses graph context for disambiguation
+   └─ Output: uuid_map{} mapping temp IDs to resolved UUIDs
    
-4. EXTRACT RELATIONSHIPS (extract-relationships.prompt.md)
-   └─ Identify facts/edges between resolved entities
+3. EXTRACT RELATIONSHIPS (extract-relationships.prompt.md)
+   └─ Graph-independent: extract relationships using resolved entity UUIDs
+   └─ Identity/temporal relationships use target_literal
+   └─ Output: relationships with temporal bounds
    
-5. EXTRACT DATES (extract-dates.prompt.md)
-   └─ Extract temporal bounds for each relationship
-   
-6. REFLEXION - RELATIONSHIPS (reflexion-relationships.prompt.md)
-   └─ Self-check: did we miss any facts?
-
-7. RESOLVE EDGES (resolve-edges.prompt.md)
+4. RESOLVE EDGES (resolve-edges.prompt.md)
    └─ Match extracted edges to existing edges (deduplication)
    
-8. DETECT CONTRADICTIONS (detect-contradictions.prompt.md)
+5. IDENTITY PROMOTION (code, not prompt)
+   └─ HAS_EMAIL, HAS_PHONE, HAS_HANDLE → entity_aliases table
+   └─ Provenance stored in episode_relationship_mentions.target_literal
+   
+6. DETECT CONTRADICTIONS (detect-contradictions.prompt.md)
    └─ Find existing facts that new facts contradict
-   └─ Mark contradicted edges with invalid_at timestamp
+   └─ Set invalid_at on old edges
 
-9. SUMMARIZE ENTITY (summarize-entity.prompt.md)
+7. SUMMARIZE ENTITY (summarize-entity.prompt.md) [deferred]
    └─ Update entity summaries with new information
 ```
 
 ## Key Concepts
 
-### Episodes
-Temporal units of content (messages, documents, events). Each episode:
-- Has a `valid_at` timestamp (when it occurred)
-- Has a `created_at` timestamp (when we ingested it)
-- Can be typed (message, json, text)
+### Graph-Independent Extraction
 
-### Entities (Nodes)
-Things extracted from episodes:
-- People, companies, projects, files, concepts
-- Have types from a defined ontology
-- Can be deduplicated against existing entities
-- Accumulate summaries over time
+Extraction prompts don't query the existing graph. This keeps extraction:
+- Parallelizable (process multiple episodes concurrently)
+- Reproducible (same input → same output)
+- Clean (bad graph data doesn't corrupt extraction)
 
-### Relationships (Edges)
-Facts connecting two entities:
-- Have a type (WORKS_AT, KNOWS, CREATED)
-- Have a natural language `fact` description
-- Have temporal bounds (valid_at, invalid_at)
-- Can be invalidated when contradicted
+Resolution uses the graph to disambiguate extracted entities.
 
-### Bi-Temporal Model
-Every fact tracks two time dimensions:
-- **Valid time**: when the fact is true in reality
-- **Transaction time**: when we learned about it
+### Entity Types (8 total)
 
-This enables queries like:
-- "What did we believe on January 1st?" (transaction time)
-- "What was true on January 1st?" (valid time)
+Entities are things you want to traverse to/from:
 
-## Customization
-
-### Entity Types
-Define your domain's entity types:
 ```json
 {
   "entity_types": [
-    {"id": 0, "name": "Person", "description": "A human being"},
-    {"id": 1, "name": "Company", "description": "An organization or business"},
-    {"id": 2, "name": "Project", "description": "A work effort or initiative"},
-    {"id": 3, "name": "File", "description": "A file or document"}
+    {"id": 0, "name": "Entity", "description": "Default/unknown type"},
+    {"id": 1, "name": "Person", "description": "A human being"},
+    {"id": 2, "name": "Company", "description": "Business or organization"},
+    {"id": 3, "name": "Project", "description": "A project, product, or codebase"},
+    {"id": 4, "name": "Location", "description": "A place (city, address, venue)"},
+    {"id": 5, "name": "Event", "description": "A meeting or occurrence"},
+    {"id": 6, "name": "Document", "description": "A file or written work"},
+    {"id": 7, "name": "Pet", "description": "An animal companion"}
   ]
 }
 ```
 
-### Relationship Types
-Define common relationship patterns:
-```json
-{
-  "edge_types": [
-    {"name": "WORKS_AT", "signature": "Person -> Company"},
-    {"name": "KNOWS", "signature": "Person -> Person"},
-    {"name": "OWNS", "signature": "Person -> Project"},
-    {"name": "CREATED", "signature": "Person -> File"}
-  ]
-}
-```
+**NOT entities:**
+- Dates — stored as `target_literal` (ISO 8601)
+- AI agents — no durable identity
+- Concepts, activities, professions — searchable via episode embeddings
 
-### Custom Instructions
+### target_literal vs target_entity_id
+
+Relationships point to either an entity or a literal value:
+
+| Target Type | Relationship Types | Format | Promoted to Alias? |
+|-------------|-------------------|--------|-------------------|
+| **Literal → Alias** | HAS_EMAIL, HAS_PHONE, HAS_HANDLE, HAS_USERNAME, ALSO_KNOWN_AS | Various | Yes |
+| **Literal → Date** | BORN_ON, ANNIVERSARY_ON, OCCURRED_ON, SCHEDULED_FOR, STARTED_ON, ENDED_ON | ISO 8601 | No |
+| **Entity** | Everything else | UUID | No |
+
+### Entity-to-Entity Relationships
+
+| Category | Relationships | Target Type |
+|----------|---------------|-------------|
+| Personal | BORN_IN, LIVES_IN | Location |
+| Personal | HAS_PET | Pet |
+| Professional | WORKS_AT, OWNS, FOUNDED | Company |
+| Professional | ATTENDED | Company or Event |
+| Social | KNOWS, FRIEND_OF, SPOUSE_OF, PARENT_OF, DATING | Person |
+| Projects | CREATED, BUILDING, WORKING_ON | Project |
+| Events | ATTENDED, HOSTED | Event |
+| Content | AUTHORED, REFERENCES | Document |
+
+### Bi-Temporal Model
+
+Relationships track when facts are true in reality:
+- `valid_at`: When the relationship became true
+- `invalid_at`: When the relationship stopped being true
+
+Plus system time:
+- `created_at`: When we learned about it
+
+### Date Format
+
+All dates must be **ISO 8601**:
+- Full date: `YYYY-MM-DD` (e.g., `1990-05-15`)
+- Month precision: `YYYY-MM` (e.g., `2024-01`)
+- Year precision: `YYYY` (e.g., `2020`)
+
+## Custom Instructions
+
 Each prompt accepts `{{custom_extraction_instructions}}` for domain-specific guidance:
+
 ```
 Focus on extracting:
 - Trading system components and their relationships
@@ -104,17 +121,9 @@ Focus on extracting:
 - Technical decisions and their rationale
 ```
 
-## Integration with Cortex
-
-These prompts can be used in Cortex's extraction pipeline:
-
-1. **Episode = Segment**: Cortex segments become Graphiti episodes
-2. **Facets + Relationships**: Extract both simple facets AND relationship triples
-3. **Bi-temporal tracking**: Add valid_at/invalid_at to facets table
-4. **Dedup inline**: Resolve during extraction, not in batch
-
 ## References
 
 - [Graphiti GitHub](https://github.com/getzep/graphiti)
 - [Graphiti Docs](https://help.getzep.com/graphiti)
 - [Zep Paper: Temporal Knowledge Graph Architecture](https://arxiv.org/abs/2501.13956)
+- [MEMORY_SYSTEM_SPEC.md](../../docs/MEMORY_SYSTEM_SPEC.md) — Full specification

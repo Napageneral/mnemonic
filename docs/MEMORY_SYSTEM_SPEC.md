@@ -1,7 +1,7 @@
 # Cortex Memory System Specification
 
-**Status:** Draft - Pending Review  
-**Last Updated:** January 21, 2026  
+**Status:** Draft v2 - Reviewed  
+**Last Updated:** January 22, 2026  
 **Related:** `ARCHITECTURE_EVOLUTION.md`, `prompts/graphiti/README.md`
 
 ---
@@ -114,12 +114,16 @@ Benefits:
 
 ### 3.2 Entity Types
 
-**Philosophy: Everything meaningful is an entity.** No special-cased attributes. The graph captures all facts as relationships between entities.
+**Philosophy: Entities are things you want to traverse to/from.** Abstract concepts (hobbies, professions, technologies) are discoverable via embedding search on episodes. Literal values (emails, phones, dates) use `target_literal` on relationships.
 
-This enables powerful queries like:
-- "Who else likes hiking?" → traverse from Activity:Hiking
-- "What concepts has Claude explained to me?" → traverse from Agent:Claude
-- "What happened on my birthday?" → traverse from Date entity
+This keeps the entity model focused on:
+- **People** you interact with
+- **Organizations** you work with/for
+- **Projects** you build or reference
+- **Places** with geographic significance
+- **Events** with participants
+- **Documents** you create or reference
+- **Pets** (animal companions)
 
 **Default types:**
 
@@ -127,18 +131,12 @@ This enables powerful queries like:
 |----|------|-------------|----------|
 | 0 | Entity | Default/unknown type | Fallback |
 | 1 | Person | A human being | Tyler, Dad, Casey |
-| 2 | Agent | An AI assistant or bot | Claude, GPT-4, Codex |
-| 3 | Company | Business or organization | Anthropic, Google, Intent Systems |
-| 4 | Project | A project, product, or codebase | Cortex, Nexus, HTAA |
-| 5 | Location | A place | Austin, Texas, 1812 Dwyer Ave |
-| 6 | Date | A specific date or time point | 1990-05-15, 2024-01-21 |
-| 7 | Event | A meeting or occurrence | "Jan 21 standup", "HTAA meeting" |
-| 8 | Document | A file or written work | README.md, "the spec" |
-| 9 | Concept | An idea, topic, or notion | BiTemporalModel, Monads, Memory |
-| 10 | Technology | A tool, language, or framework | SQLite, Go, React |
-| 11 | Activity | A hobby, sport, or activity | Hiking, Chess, Coding |
-| 12 | Profession | A job role or career | SoftwareEngineer, Designer |
-| 13 | Pet | An animal companion | Luna, Max |
+| 2 | Company | Business or organization | Anthropic, Google, Intent Systems |
+| 3 | Project | A project, product, or codebase | Cortex, Nexus, HTAA |
+| 4 | Location | A place | Austin, Texas, 1812 Dwyer Ave |
+| 5 | Event | A meeting or occurrence | "Jan 21 standup", "HTAA meeting" |
+| 6 | Document | A file or written work | README.md, "the spec" |
+| 7 | Pet | An animal companion | Luna, Max |
 
 **Stored in config or code:**
 
@@ -146,18 +144,12 @@ This enables powerful queries like:
 var DefaultEntityTypes = []EntityType{
     {ID: 0, Name: "Entity", Description: "Default/unknown type"},
     {ID: 1, Name: "Person", Description: "A human being"},
-    {ID: 2, Name: "Agent", Description: "An AI assistant or bot"},
-    {ID: 3, Name: "Company", Description: "Business or organization"},
-    {ID: 4, Name: "Project", Description: "A project, product, or codebase"},
-    {ID: 5, Name: "Location", Description: "A place (city, address, venue)"},
-    {ID: 6, Name: "Date", Description: "A specific date or time point"},
-    {ID: 7, Name: "Event", Description: "A meeting, occurrence, or happening"},
-    {ID: 8, Name: "Document", Description: "A file, article, or written work"},
-    {ID: 9, Name: "Concept", Description: "An idea, topic, or abstract notion"},
-    {ID: 10, Name: "Technology", Description: "A tool, language, or framework"},
-    {ID: 11, Name: "Activity", Description: "A hobby, sport, or activity"},
-    {ID: 12, Name: "Profession", Description: "A job role or career"},
-    {ID: 13, Name: "Pet", Description: "An animal companion"},
+    {ID: 2, Name: "Company", Description: "Business or organization"},
+    {ID: 3, Name: "Project", Description: "A project, product, or codebase"},
+    {ID: 4, Name: "Location", Description: "A place (city, address, venue)"},
+    {ID: 5, Name: "Event", Description: "A meeting, occurrence, or happening"},
+    {ID: 6, Name: "Document", Description: "A file, article, or written work"},
+    {ID: 7, Name: "Pet", Description: "An animal companion"},
 }
 ```
 
@@ -165,42 +157,63 @@ var DefaultEntityTypes = []EntityType{
 
 | Entity Type | Resolution Strategy |
 |-------------|---------------------|
-| Person, Agent | Aliases + context scoring + LLM |
+| Person | Aliases + context scoring + LLM |
 | Company, Project | Name similarity + aliases |
 | Location | Name + normalization (geocoding optional) |
-| Date | Exact match (normalize format first) |
-| Concept, Technology | Embedding similarity + LLM |
-| Activity, Profession | Embedding similarity + ontology clustering |
 | Event | Name + date + participants |
 | Document | Path/name + content hash |
+| Pet | Name + owner relationship |
 
-**Extensible:** Add custom types for specific domains (e.g., `Capability`, `Repository`, `Meeting`).
+**Extensible:** Add custom types for specific domains (e.g., `Repository`, `Meeting`).
 
-**Taxonomy evolution:** Types cluster and refine over time. See `docs/ideas/TAXONOMY_EVOLUTION.md`.
+**What's NOT an entity:**
+- **Dates** — stored as `target_literal` on temporal relationships (ISO 8601)
+- **AI agents** — no durable identity; AI chat content is in episodes
+- **Concepts, activities, professions** — searchable via episode embeddings
 
 ### 3.3 Relationship Types
 
 Relationships are **free-form strings** (taxonomy evolution will cluster them later).
 
-**Common relationship types:**
+**Target types:** Relationships point to either an entity (`target_entity_id`) or a literal value (`target_literal`).
 
-| Category | Relationship Types |
-|----------|-------------------|
-| **Identity** | HAS_EMAIL, HAS_PHONE, HAS_HANDLE, ALSO_KNOWN_AS |
-| **Personal** | IS_A, LIKES, DISLIKES, PREFERS, BORN_ON, BORN_IN, HAS_DIET |
-| **Professional** | WORKS_AT, OWNS, FOUNDED, ATTENDED, HAS_ROLE |
-| **Social** | KNOWS, FRIEND_OF, SPOUSE_OF, PARENT_OF, CHILD_OF, SIBLING_OF, COLLEAGUE_OF |
-| **Temporal** | OCCURRED_ON, SCHEDULED_FOR, STARTED_ON, ENDED_ON, VALID_FROM, VALID_UNTIL |
-| **Projects** | USES, DEPENDS_ON, CREATED, CONTRIBUTED_TO, MAINTAINS |
-| **AI Conversations** | EXPLAINED, SUGGESTED, ASKED_ABOUT, AGREED_WITH, DISAGREED_WITH, DISCUSSED, IMPLEMENTED, COMPARED, RECOMMENDED |
-| **Location** | LIVES_IN, LOCATED_IN, VISITED, TRAVELED_TO |
-| **Content** | MENTIONED_IN, REFERENCES, CONTAINS, AUTHORED |
+| Target Type | Relationship Types | Format |
+|-------------|-------------------|--------|
+| **Literal → Alias** | HAS_EMAIL, HAS_PHONE, HAS_HANDLE, HAS_USERNAME, ALSO_KNOWN_AS | Promoted to `entity_aliases` |
+| **Literal → Date** | BORN_ON, ANNIVERSARY_ON, OCCURRED_ON, SCHEDULED_FOR, STARTED_ON, ENDED_ON | ISO 8601: `YYYY-MM-DD` or `YYYY-MM` |
+| **Entity** | Everything else | UUID reference |
+
+**Common entity-to-entity relationship types:**
+
+| Category | Relationship Types | Target Entity Type |
+|----------|-------------------|-------------------|
+| **Personal** | BORN_IN, LIVES_IN | Location |
+| **Personal** | HAS_PET | Pet |
+| **Professional** | WORKS_AT, OWNS, FOUNDED | Company |
+| **Professional** | ATTENDED | Company (school) or Event |
+| **Social** | KNOWS, FRIEND_OF, SPOUSE_OF, PARENT_OF, DATING | Person |
+| **Projects** | CREATED, BUILDING, WORKING_ON, CONTRIBUTED_TO | Project |
+| **Events** | ATTENDED, HOSTED | Event |
+| **Location** | LOCATED_IN, VISITED | Location |
+| **Content** | AUTHORED, REFERENCES | Document |
+
+**Literal value formats:**
+
+| Type | Format | Examples |
+|------|--------|----------|
+| Email | Lowercase | `tyler@example.com` |
+| Phone | E.164 preferred | `+1-707-287-6731` |
+| Handle | With @ prefix | `@tnapathy` |
+| Username | As-is | `tnapathy` |
+| Date | ISO 8601 | `1990-05-15`, `2024-01`, `2020` |
 
 **All relationships have:**
 - `relation_type`: The type (free-form string, SCREAMING_SNAKE_CASE)
 - `fact`: Natural language description ("Tyler works at Anthropic")
-- `valid_at` / `invalid_at`: Bi-temporal bounds
-- `source_episode_id`: Which episode extracted this (via mentions table)
+- `target_entity_id` OR `target_literal` (exactly one must be set)
+- `valid_at` / `invalid_at`: Bi-temporal bounds (when relationship was true in reality)
+- `created_at`: When system learned about it
+- Provenance lives in `episode_relationship_mentions` (episode, speaker attribution, source_type)
 
 ### 3.4 SQLite Schema Additions
 
@@ -209,15 +222,11 @@ Relationships are **free-form strings** (taxonomy evolution will cluster them la
 -- ENTITIES (canonical, deduplicated)
 -- ============================================
 -- This generalizes People/Contacts to all entity types.
--- A "Person" entity is just an entity with entity_type='Person'.
+-- A "Person" entity is just an entity with entity_type_id=1.
 CREATE TABLE entities (
     id TEXT PRIMARY KEY,
     canonical_name TEXT NOT NULL,
-    entity_type TEXT NOT NULL,  -- Person, Company, Project, Location, Concept, etc.
-    
-    -- No attributes column - everything is relationships to other entities!
-    -- "Tyler's birthday" = (Tyler) --BORN_ON--> (Date:1990-05-15)
-    -- "Tyler likes hiking" = (Tyler) --LIKES--> (Activity:Hiking)
+    entity_type_id INTEGER NOT NULL,  -- ID from configured entity types (see §3.2)
     
     summary TEXT,               -- Auto-generated from relationships + episodes
     summary_updated_at TEXT,    -- When summary was last regenerated
@@ -225,12 +234,13 @@ CREATE TABLE entities (
     -- How this entity was created
     origin TEXT NOT NULL,       -- 'contact_import', 'extracted', 'manual'
     confidence REAL DEFAULT 1.0,
+    merged_into TEXT REFERENCES entities(id),  -- Non-null if this entity was merged
     
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-CREATE INDEX idx_entities_type ON entities(entity_type);
+CREATE INDEX idx_entities_type ON entities(entity_type_id);
 CREATE INDEX idx_entities_name ON entities(canonical_name);
 
 -- ============================================
@@ -240,11 +250,14 @@ CREATE INDEX idx_entities_name ON entities(canonical_name);
 -- ALIASES CAN BE SHARED: family phone, team email can map to multiple entities.
 -- When resolving, shared aliases require disambiguation.
 -- When merging entities, reassign loser's aliases to winner.
+-- 
+-- Identity relationships (HAS_EMAIL, HAS_PHONE, HAS_HANDLE) are promoted here
+-- rather than stored in the relationships table. See §4.4.
 CREATE TABLE entity_aliases (
     id TEXT PRIMARY KEY,
     entity_id TEXT NOT NULL REFERENCES entities(id),
     alias TEXT NOT NULL,
-    alias_type TEXT NOT NULL,  -- 'name', 'email', 'phone', 'handle', 'nickname'
+    alias_type TEXT NOT NULL,  -- 'name', 'email', 'phone', 'handle', 'username', 'nickname'
     normalized TEXT,           -- Lowercase/cleaned for matching
     is_shared BOOLEAN DEFAULT FALSE,  -- TRUE if multiple entities share this alias
     created_at TEXT NOT NULL
@@ -258,29 +271,46 @@ CREATE INDEX idx_entity_aliases_entity ON entity_aliases(entity_id);
 -- ============================================
 -- RELATIONSHIPS (deduplicated triples with temporal bounds)
 -- ============================================
+-- Identity relationships (HAS_EMAIL, HAS_PHONE, HAS_HANDLE) go to entity_aliases.
+-- Temporal relationships (BORN_ON, OCCURRED_ON, etc.) use target_literal.
+-- All other relationships use target_entity_id.
 CREATE TABLE relationships (
     id TEXT PRIMARY KEY,
     source_entity_id TEXT NOT NULL REFERENCES entities(id),
-    target_entity_id TEXT NOT NULL REFERENCES entities(id),
-    relation_type TEXT NOT NULL,  -- WORKS_AT, KNOWS, CREATED, LIVES_WITH, etc.
-    fact TEXT NOT NULL,           -- Natural language: "Tyler works at Intent Systems"
+    target_entity_id TEXT REFERENCES entities(id),
+    target_literal TEXT,  -- For temporal relationships (ISO 8601)
+    relation_type TEXT NOT NULL,  -- WORKS_AT, KNOWS, CREATED, BORN_ON, etc.
+    fact TEXT NOT NULL,           -- Natural language: "Tyler works at Anthropic"
     
-    -- Bi-temporal tracking
+    -- Bi-temporal tracking (Graphiti-style)
     valid_at TEXT,      -- When relationship became true in reality
     invalid_at TEXT,    -- When relationship stopped being true in reality
     created_at TEXT NOT NULL,  -- When system first learned about it
-    expired_at TEXT,    -- When system marked it as superseded (by contradiction detection)
     
     -- Metadata
     confidence REAL DEFAULT 1.0,
-    
-    UNIQUE(source_entity_id, target_entity_id, relation_type, valid_at)
+
+    -- Exactly one of target_entity_id or target_literal must be set
+    CHECK (
+        (target_entity_id IS NOT NULL AND target_literal IS NULL) OR
+        (target_entity_id IS NULL AND target_literal IS NOT NULL)
+    )
 );
 
 CREATE INDEX idx_relationships_source ON relationships(source_entity_id);
 CREATE INDEX idx_relationships_target ON relationships(target_entity_id);
 CREATE INDEX idx_relationships_type ON relationships(relation_type);
-CREATE INDEX idx_relationships_temporal ON relationships(valid_at, invalid_at, expired_at);
+CREATE INDEX idx_relationships_temporal ON relationships(valid_at, invalid_at);
+
+-- Uniqueness for entity-target relationships
+CREATE UNIQUE INDEX idx_relationships_unique_entity
+ON relationships(source_entity_id, target_entity_id, relation_type, valid_at)
+WHERE target_entity_id IS NOT NULL;
+
+-- Uniqueness for literal-target relationships
+CREATE UNIQUE INDEX idx_relationships_unique_literal
+ON relationships(source_entity_id, target_literal, relation_type, valid_at)
+WHERE target_literal IS NOT NULL;
 
 -- ============================================
 -- EPISODE-ENTITY MENTIONS (which episodes mention which entities)
@@ -299,7 +329,7 @@ CREATE TABLE episode_entity_mentions (
 CREATE INDEX idx_episode_entity_mentions_entity ON episode_entity_mentions(entity_id);
 
 -- ============================================
--- EPISODE-RELATIONSHIP MENTIONS (which episodes support which relationships)
+-- EPISODE-RELATIONSHIP MENTIONS (provenance for relationships)
 -- ============================================
 -- Junction table: many-to-many between episodes and relationships.
 -- Same relationship mentioned in 10 episodes = 10 records here.
@@ -307,8 +337,15 @@ CREATE INDEX idx_episode_entity_mentions_entity ON episode_entity_mentions(entit
 CREATE TABLE episode_relationship_mentions (
     id TEXT PRIMARY KEY,
     episode_id TEXT NOT NULL REFERENCES episodes(id),
-    relationship_id TEXT NOT NULL REFERENCES relationships(id),
+    relationship_id TEXT REFERENCES relationships(id),  -- NULL for identity relationships
     extracted_fact TEXT NOT NULL,  -- Original extracted text (raw, pre-dedup)
+    asserted_by_entity_id TEXT REFERENCES entities(id),  -- Speaker who made the statement
+    source_type TEXT,  -- 'self_disclosed', 'mentioned', 'inferred'
+    
+    -- For identity relationships (HAS_EMAIL, etc.) that go to aliases instead
+    target_literal TEXT,  -- The literal value (email, phone, etc.)
+    alias_id TEXT REFERENCES entity_aliases(id),  -- Link to created alias
+    
     confidence REAL,
     created_at TEXT NOT NULL
 );
@@ -334,6 +371,22 @@ CREATE TABLE merge_candidates (
 );
 
 CREATE INDEX idx_merge_candidates_status ON merge_candidates(status);
+
+-- ============================================
+-- MERGE EVENTS (audit log)
+-- ============================================
+CREATE TABLE merge_events (
+    id TEXT PRIMARY KEY,
+    source_entity_id TEXT NOT NULL REFERENCES entities(id),
+    target_entity_id TEXT NOT NULL REFERENCES entities(id),
+    merge_type TEXT NOT NULL,      -- 'hard_identifier', 'name_similarity', etc.
+    triggering_facts TEXT,         -- JSON: facts that triggered the merge
+    similarity_score REAL,
+    created_at TEXT NOT NULL,
+    resolved_by TEXT               -- 'auto', 'user:<id>', etc.
+);
+
+CREATE INDEX idx_merge_events_target ON merge_events(target_entity_id);
 
 -- ============================================
 -- EMBEDDINGS (unified for all embeddable types)
@@ -370,7 +423,7 @@ Node Types:
 Edge Types:
 - MENTIONS (Episode → Entity)
 - RELATES_TO (Entity → Entity) with properties:
-  - relation_type, fact, valid_at, invalid_at, created_at, expired_at
+  - relation_type, fact, valid_at, invalid_at, created_at
 - HAS_MEMBER (Community → Entity)
 ```
 
@@ -428,7 +481,7 @@ Edge Types:
 
 ## Part 4: Extraction Pipeline
 
-### 4.0 Key Insight: Resolution-Time Context (Not Extraction-Time)
+### 4.0 Key Insight: Graph-Independent Extraction
 
 **Problem:** Existing knowledge should influence how entities are interpreted.
 
@@ -446,15 +499,15 @@ Problems:
 - Bad graph data corrupts extraction
 - Non-deterministic (same input → different output depending on graph state)
 
-**Chosen approach: Resolution-time context**
+**Chosen approach: Graph-independent extraction with resolution-time context**
 ```
-Episode → Extract (stateless) → Resolve with graph context
+Episode → Extract (graph-independent) → Resolve with graph context
 ```
 
-Extraction is stateless and parallelizable. Resolution uses the graph to disambiguate:
+Extraction doesn't query the existing graph. Resolution uses the graph to disambiguate:
 
 ```
-1. EXTRACT (context-free)
+1. EXTRACT (graph-independent)
    Input: "Tyler mentioned the project is delayed"
    Output: entities=["Tyler", "the project"], relationships=[("Tyler", "MENTIONED", "the project")]
 
@@ -475,7 +528,7 @@ Extraction is stateless and parallelizable. Resolution uses the graph to disambi
 ```
 
 **Benefits:**
-- Extraction is stateless, parallelizable, reproducible
+- Extraction is graph-independent, parallelizable, reproducible
 - Resolution uses graph context where it matters
 - Bad graph data doesn't corrupt extraction
 - Can re-run resolution if graph improves
@@ -487,6 +540,8 @@ Extraction is stateless and parallelizable. Resolution uses the graph to disambi
 
 ### 4.1 Pipeline Overview
 
+This pipeline follows Graphiti's proven approach: split extraction into focused prompts, then resolve against the graph.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                      MEMORY EXTRACTION PIPELINE                          │
@@ -495,20 +550,14 @@ Extraction is stateless and parallelizable. Resolution uses the graph to disambi
 │  INPUT: Episode (grouped events from any chunking strategy)             │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 1. EXTRACT ENTITIES (stateless, parallelizable)                  │   │
-│  │    Prompt: extract-entities-{message|text}.prompt.md             │   │
+│  │ 1. EXTRACT ENTITIES (graph-independent)                          │   │
+│  │    Prompt: extract-entities.prompt.md                            │   │
 │  │    Input: episode content + optional previous episodes           │   │
 │  │    Output: [{name, entity_type_id}, ...]                         │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 2. REFLEXION - ENTITIES (optional)                               │   │
-│  │    Prompt: reflexion-entities.prompt.md                          │   │
-│  │    Purpose: Self-check for missed entities                       │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                              ↓                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 3. RESOLVE ENTITIES (with graph context)                         │   │
+│  │ 2. RESOLVE ENTITIES (with graph context)                         │   │
 │  │    - Exact alias match (high confidence)                         │   │
 │  │    - Embed + search existing entities                            │   │
 │  │    - Context scoring (channel, co-mentions, relationships)       │   │
@@ -519,61 +568,51 @@ Extraction is stateless and parallelizable. Resolution uses the graph to disambi
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 4. EXTRACT RELATIONSHIPS                                         │   │
+│  │ 3. EXTRACT RELATIONSHIPS (graph-independent)                     │   │
 │  │    Prompt: extract-relationships.prompt.md                       │   │
-│  │    Input: episode + resolved entities + relevant_context         │   │
-│  │    Output: [{source_id, target_id, relation_type, fact,          │   │
+│  │    Input: episode content + resolved entities with UUIDs         │   │
+│  │    Output: [{source_uuid, target, relation_type, fact,           │   │
 │  │              valid_at, invalid_at}, ...]                         │   │
+│  │    Note: HAS_* identity relationships use target_literal         │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 5. CLASSIFY UTTERANCE (optional, for better extraction)          │   │
-│  │    Determine: sincere / sarcastic / hypothetical / uncertain     │   │
-│  │    Affects: whether to extract, confidence level                 │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                              ↓                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 6. EXTRACT TEMPORAL BOUNDS                                       │   │
-│  │    Prompt: extract-dates.prompt.md                               │   │
-│  │    Refine: valid_at, invalid_at for each relationship            │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                              ↓                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 7. REFLEXION - RELATIONSHIPS (optional)                          │   │
-│  │    Prompt: reflexion-relationships.prompt.md                     │   │
-│  │    Purpose: Self-check for missed facts                          │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                              ↓                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 8. RESOLVE EDGES                                                 │   │
+│  │ 4. RESOLVE EDGES                                                 │   │
 │  │    - Search existing edges between same entity pairs             │   │
 │  │    - Prompt: resolve-edges.prompt.md                             │   │
 │  │    - Decision: merge with existing OR create new                 │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 9. DETECT CONTRADICTIONS                                         │   │
-│  │    Prompt: detect-contradictions.prompt.md                       │   │
-│  │    Find: existing facts contradicted by new facts                │   │
-│  │    Action: set invalid_at on contradicted edges                  │   │
+│  │ 5. IDENTITY PROMOTION (code)                                     │   │
+│  │    HAS_* relationships → aliases (self_disclosed only)           │   │
+│  │    Store provenance in episode_relationship_mentions             │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 10. GENERATE EMBEDDINGS                                          │   │
+│  │ 6. DETECT CONTRADICTIONS                                         │   │
+│  │    Prompt: detect-contradictions.prompt.md                       │   │
+│  │    Find: existing facts contradicted by new facts                │   │
+│  │    Action: set invalid_at on old edge (use episode timestamp     │   │
+│  │            or inferred date)                                     │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ 7. GENERATE EMBEDDINGS                                           │   │
 │  │     - Embed new entity names                                     │   │
 │  │     - Embed new relationship facts                               │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 11. SAVE                                                         │   │
-│  │     SQLite: entities, relationships, mentions, embeddings        │   │
-│  │     Kuzu: EntityNodes, EntityEdges, EpisodeNodes, MENTIONS       │   │
+│  │ 8. SAVE                                                          │   │
+│  │    SQLite: entities, entity_aliases, relationships,              │   │
+│  │            episode_*_mentions, embeddings                        │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ 12. UPDATE ENTITY SUMMARIES (optional)                           │   │
-│  │     Prompt: summarize-entity.prompt.md                           │   │
-│  │     Update summaries for entities mentioned in this episode      │   │
+│  │ 9. UPDATE ENTITY SUMMARIES (optional, deferred)                  │   │
+│  │    Prompt: summarize-entity.prompt.md                            │   │
+│  │    Update summaries for entities mentioned in this episode       │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  PARALLEL: Extract facets using existing Cortex pipeline               │
@@ -615,7 +654,7 @@ Extraction is stateless and parallelizable. Resolution uses the graph to disambi
    +low:   Name similarity only
    
    -score: Different channel, no overlap signals
-   -score: Conflicting attributes (different phone number)
+  -score: Conflicting identifiers (different phone number)
 
 4. DECISION LOGIC
    If single candidate with high score (>0.9) → match
@@ -679,60 +718,60 @@ If identifier overlap (same phone in both):
   - Auto-merge, combine aliases
 ```
 
-### 4.4 Identity Promotion: Relationships → Aliases
+### 4.4 Identity Promotion: target_literal → Aliases
 
-**Key insight:** Extraction produces relationships. A separate pass promotes some relationships to aliases.
+**Key insight:** Identity relationships (HAS_EMAIL, HAS_PHONE, HAS_HANDLE) use `target_literal` instead of `target_entity_id`. They go directly to aliases, not the relationships table.
 
-**Why this two-step approach:**
-- Extraction is stateless (just extracts what it sees)
-- Identity promotion is a policy decision (what counts as an identifier?)
-- Handles shared identifiers (family phone, team email) gracefully
-- Aliases drive collision detection; relationships are supplementary
+**Why this approach:**
+- Identifiers (emails, phones) aren't entities you traverse to
+- Avoids entity count bloat from literal values
+- Aliases are the right abstraction for identity resolution
+- Provenance preserved in `episode_relationship_mentions.target_literal`
 
 **The flow:**
 
 ```
-1. EXTRACTION (stateless)
+1. EXTRACTION (graph-independent)
    Message: "my recovery email is jim@napageneralstore.com"
    From: Dad (+1-650-823-8440)
    
-   Extracted: 
-     Entities: ["Dad"]
-     Relationships: [
-       {source: "Dad", type: "HAS_EMAIL", target: "jim@napageneralstore.com",
-        source_type: "self_disclosed", evidence: "my recovery email is..."}
-     ]
+   Extracted relationships:
+   [
+     {
+       source_entity_id: 0,  // Dad
+       relation_type: "HAS_EMAIL",
+       target_literal: "jim@napageneralstore.com",  // NOT target_entity_id
+       fact: "Dad's email is jim@napageneralstore.com",
+       source_type: "self_disclosed"
+     }
+   ]
 
-2. RESOLUTION
-   "Dad" → resolves to existing Dad entity (via channel participant matching)
-   Relationship stored with resolved entity IDs
+2. ENTITY RESOLUTION
+   "Dad" → resolves to existing Dad entity UUID
 
-3. IDENTITY PROMOTION (post-processing pass)
-   For relationships with type in PROMOTABLE_TYPES:
-     If source_type = 'self_disclosed' AND confidence >= 0.8:
-       If target is not shared (only one HAS_* relationship to it):
-         Add relationship.target as alias on source entity
-         
-   Result: Dad entity gains alias "jim@napageneralstore.com"
+3. IDENTITY PROMOTION (code step)
+   For relationships with type in IDENTITY_TYPES:
+     If source_type = 'self_disclosed':
+       - Create alias: (Dad_uuid, "jim@napageneralstore.com", type='email')
+       - Store provenance: episode_relationship_mentions with target_literal
+       - Do NOT create a relationships table entry
 
 4. COLLISION DETECTION (runs on aliases)
    Check: Does any other entity have alias "jim@napageneralstore.com"?
    If yes → create merge_candidate
 ```
 
-**What promotes to alias vs stays as relationship:**
+**Identity relationship types (use target_literal):**
 
-| Relationship Type | Promotes to Alias? | Notes |
-|-------------------|-------------------|-------|
-| HAS_EMAIL | Yes | Unique identifier |
-| HAS_PHONE | Yes | Unique identifier |
-| HAS_HANDLE | Yes | Twitter, Instagram, etc. |
-| HAS_USERNAME | Yes | Platform-specific |
-| HAS_NAME / ALSO_KNOWN_AS | Yes | Name variants, nicknames |
-| WORKS_AT | No | Relationship to Company entity |
-| LIVES_IN | No | Relationship to Location entity |
-| HAS_SPOUSE | No | Relationship to Person entity |
-| OWNS | No | Relationship to Company entity |
+| Relationship Type | Alias Type | Notes |
+|-------------------|-----------|-------|
+| HAS_EMAIL | email | Unique identifier |
+| HAS_PHONE | phone | Unique identifier |
+| HAS_HANDLE | handle | Twitter, Instagram, etc. |
+| HAS_USERNAME | username | Platform-specific |
+| ALSO_KNOWN_AS | nickname | Name variants |
+
+**All other relationships use target_entity_id** and go to the relationships table normally.
 
 **Shared identifier handling:**
 
@@ -742,13 +781,13 @@ Scenario: Family phone number shared by multiple people
 Message from Dad: "our home number is 555-1234"
 Message from Mom: "you can reach us at 555-1234"
 
-Both create relationships:
-  (Dad, HAS_PHONE, "555-1234")
-  (Mom, HAS_PHONE, "555-1234")
+Both extractions produce:
+  {source: Dad, type: HAS_PHONE, target_literal: "555-1234", source_type: "self_disclosed"}
+  {source: Mom, type: HAS_PHONE, target_literal: "555-1234", source_type: "self_disclosed"}
 
 Identity promotion:
   Both entities get the alias added
-  BUT: alias.is_shared = TRUE (detected because multiple HAS_PHONE relationships exist)
+  Detect shared: same alias across multiple entities → set is_shared=TRUE
   
 Result:
   entity_aliases: 
@@ -765,7 +804,7 @@ Resolution behavior:
 
 **Current system:** `person_facts` table with category/fact_type/fact_value structure.
 
-**Goal:** Unify into entity memory system. **Everything becomes entities + relationships.**
+**Goal:** Unify into entity memory system. **Everything becomes relationships** (some to entities, some to literals).
 
 **Philosophy:** No attributes. If it's worth storing, it's worth making queryable via the graph.
 
@@ -779,14 +818,9 @@ Resolution behavior:
 | social_* | `entity_aliases` | type='handle' |
 | full_legal_name | `entity_aliases` + `canonical_name` | type='name' |
 | nickname | `entity_aliases` | type='nickname' |
-| **Dates (→ Date Entities)** | | |
-| birthdate | `relationship` | (Person) --BORN_ON--> (Date:1990-05-15) |
-| anniversary | `relationship` | (Person) --ANNIVERSARY_ON--> (Date) |
-| **Professions (→ Profession Entities)** | | |
-| profession | `relationship` | (Person) --IS_A--> (Profession:SoftwareEngineer) |
-| **Activities (→ Activity Entities)** | | |
-| hobbies | `relationship` | (Person) --LIKES--> (Activity:Hiking) |
-| dietary_preferences | `relationship` | (Person) --HAS_DIET--> (Concept:Vegetarian) |
+| **Dates (→ target_literal)** | | |
+| birthdate | `relationship` | (Person) --BORN_ON--> "1990-05-15" |
+| anniversary | `relationship` | (Person) --ANNIVERSARY_ON--> "2023-02-18" |
 | **Organizations (→ Company Entities)** | | |
 | employer_current | `relationship` | (Person) --WORKS_AT--> (Company:Anthropic) |
 | business_owned | `relationship` | (Person) --OWNS--> (Company) |
@@ -797,9 +831,14 @@ Resolution behavior:
 | **Places (→ Location Entities)** | | |
 | location_current | `relationship` | (Person) --LIVES_IN--> (Location:Austin) |
 | place_of_birth | `relationship` | (Person) --BORN_IN--> (Location) |
+| **Abstract facts (→ Episode search)** | | |
+| profession | Episode text | Searchable via embedding ("who is a software engineer?") |
+| hobbies | Episode text | Searchable via embedding ("who likes hiking?") |
+| dietary_preferences | Episode text | Searchable via embedding ("who is vegetarian?") |
 | **Evidence / Context** | | |
 | evidence | `relationship.fact` | Natural language: "Dad said his email is..." |
-| source_type | `episode_relationship_mentions` | Links to source episode |
+| source_type | `episode_relationship_mentions.source_type` | self_disclosed / mentioned / inferred |
+| asserted_by | `episode_relationship_mentions.asserted_by_entity_id` | Who said it (speaker attribution) |
 | confidence | `relationship.confidence` | 0.0-1.0 |
 
 **Queryable examples:**
@@ -809,30 +848,21 @@ Resolution behavior:
 SELECT e.canonical_name 
 FROM entities e
 JOIN relationships r ON e.id = r.source_entity_id
-JOIN entities d ON r.target_entity_id = d.id
-WHERE r.relation_type = 'BORN_ON' AND d.canonical_name LIKE '1990%';
+WHERE r.relation_type = 'BORN_ON' AND r.target_literal LIKE '1990%';
 
--- Who likes hiking?
+-- Who works at Anthropic?
 SELECT e.canonical_name
 FROM entities e
 JOIN relationships r ON e.id = r.source_entity_id
-JOIN entities a ON r.target_entity_id = a.id
-WHERE r.relation_type = 'LIKES' AND a.canonical_name = 'Hiking';
-
--- What do Tyler and Ricky have in common?
-SELECT DISTINCT t.canonical_name as shared_interest
-FROM relationships r1
-JOIN relationships r2 ON r1.target_entity_id = r2.target_entity_id
-JOIN entities t ON r1.target_entity_id = t.id
-WHERE r1.source_entity_id = :tyler_id 
-  AND r2.source_entity_id = :ricky_id
-  AND r1.relation_type = r2.relation_type;
+JOIN entities c ON r.target_entity_id = c.id
+WHERE r.relation_type = 'WORKS_AT' AND c.canonical_name = 'Anthropic';
 ```
 
 **Migration strategy:**
 1. Import existing person_facts:
    - Identity fields → entity_aliases
-   - All other facts → create target entities + relationships
+   - Temporal fields → relationships with `target_literal` (ISO 8601)
+   - Entity-backed fields → create target entities + relationships
 2. Entity resolution deduplicates target entities
 3. Keep person_facts table during transition
 4. Deprecate after validation
@@ -1203,9 +1233,9 @@ def detect_conflicts(entity_a, entity_b) -> list[Conflict]:
                 values_b=list(aliases_b)
             ))
     
-    # Different birthdates
-    bday_a = get_attribute(entity_a, 'birthdate')
-    bday_b = get_attribute(entity_b, 'birthdate')
+    # Different birthdates (via relationships)
+    bday_a = get_single_relationship_target(entity_a, 'BORN_ON')
+    bday_b = get_single_relationship_target(entity_b, 'BORN_ON')
     if bday_a and bday_b and bday_a != bday_b:
         conflicts.append(Conflict(
             type='different_birthdates',
@@ -1282,17 +1312,12 @@ def execute_merge(candidate: MergeCandidate, resolved_by: str):
     """, target.id, source.id)
     sql("DELETE FROM episode_entity_mentions WHERE entity_id = ?", source.id)
     
-    # 4. Merge attributes (target wins on conflict)
-    merged_attrs = {**source.attributes, **target.attributes}
-    sql("UPDATE entities SET attributes = ? WHERE id = ?", 
-        json.dumps(merged_attrs), target.id)
-    
-    # 5. Update canonical name if source has better name
+    # 4. Update canonical name if source has better name
     if is_better_name(source.canonical_name, target.canonical_name):
         sql("UPDATE entities SET canonical_name = ? WHERE id = ?",
             source.canonical_name, target.id)
     
-    # 6. Mark source as merged (don't delete for audit trail)
+    # 5. Mark source as merged (don't delete for audit trail)
     sql("""
         UPDATE entities 
         SET merged_into = ?, 
@@ -1300,7 +1325,7 @@ def execute_merge(candidate: MergeCandidate, resolved_by: str):
         WHERE id = ?
     """, target.id, target.canonical_name, source.id)
     
-    # 7. Log the merge
+    # 6. Log the merge
     sql("""
         INSERT INTO merge_events 
         (id, source_entity_id, target_entity_id, merge_type, triggering_facts, 
@@ -1310,7 +1335,7 @@ def execute_merge(candidate: MergeCandidate, resolved_by: str):
         json.dumps(candidate.matching_facts), candidate.confidence, 
         now(), resolved_by)
     
-    # 8. Update candidate status
+    # 7. Update candidate status
     sql("""
         UPDATE merge_candidates 
         SET status = 'merged', resolved_at = ?, resolved_by = ?
@@ -1404,7 +1429,7 @@ cortex identify status
 - [ ] Implement contradiction detection
 
 ### Phase 4: Identity System
-- [ ] Implement identity promotion (relationships → aliases)
+- [ ] Implement identity promotion (target_literal → aliases)
 - [ ] Implement collision detection (O(F) algorithm)
 - [ ] Implement merge candidate creation
 - [ ] Implement auto-merge rules
@@ -1429,7 +1454,264 @@ cortex identify status
 
 ---
 
-## Part 10: Open Questions
+## Part 10: Verification & Test Suite
+
+This section defines end-to-end tests that prove each feature in this spec works as intended.
+
+### 10.1 Test Methodology
+
+- Use **fixture episodes** with expected outputs (golden files)
+- Run the **full pipeline**: extract → resolve → promote → dedupe → persist
+- Verify both **structure** (counts, FK integrity) and **semantics** (facts and values)
+- Re-run the same episodes to confirm **idempotency**
+- Fix model/config versions so results are deterministic
+
+### 10.2 Core Fixtures (Minimum Set)
+
+| Fixture | Focus | Expected Outcome |
+|---------|-------|------------------|
+| F1: Simple Person + Company | Base extraction | Person + Company entities, 1 WORKS_AT relationship |
+| F2: Identity Literals | HAS_EMAIL/HAS_PHONE | Alias created, no relationship row, mention w/ target_literal |
+| F3: Temporal Literals | BORN_ON / STARTED_ON | ISO 8601 target_literal dates |
+| F4: Ambiguous Name | Two candidates | New entity + merge_candidate |
+| F5: Shared Identifier | Family phone | alias.is_shared=TRUE, no merge_candidate |
+| F6: Contradiction | Works-at then left | old edge invalid_at set, new edge added |
+| F7: Contact Import | Gmail + iMessage | Auto-merge with identifier overlap |
+| F8: Document + Project | README ref | Document + Project + REFERENCES edge |
+| F9: Event Attendance | Meeting | Event entity + ATTENDED edges |
+| F10: person_facts migration | Legacy facts | Aliases + relationships mapped correctly |
+
+### 10.3 Schema & Integrity Tests
+
+- All FKs are valid for entities/relationships/mentions
+- `episode_relationship_mentions.relationship_id` nullable for literal-only rows
+- Unique constraint prevents duplicate relationships per `(source, target, type, valid_at)`
+- `entity_aliases` allows shared aliases across entities
+
+### 10.4 Entity Extraction Tests
+
+- Only entity types from §3.2 are extracted
+- Speakers extracted in conversational episodes
+- No dates, AI agents, or concepts extracted as entities
+- Entities only in `previous_episodes` are excluded
+
+**Pass:** Expected entities (name + type) match fixture outputs.
+
+### 10.5 Entity Resolution Tests
+
+- Exact alias match resolves to existing entity
+- Ambiguous matches create new entity + merge_candidate
+- `merge_candidates.candidates_considered` populated
+- Deterministic results with fixed graph + config
+
+### 10.6 Relationship Extraction Tests
+
+- Identity + temporal relationships use `target_literal`
+- All other relationships use `target_entity_id`
+- `valid_at`/`invalid_at` only when explicitly stated
+- Dates normalized to ISO 8601 (YYYY-MM-DD, YYYY-MM, YYYY)
+
+### 10.7 Identity Promotion Tests
+
+- HAS_EMAIL / HAS_PHONE / HAS_HANDLE → alias created
+- Promotion only when `source_type = self_disclosed`
+- `episode_relationship_mentions` stores `target_literal` + `alias_id`
+- No rows inserted in `relationships` for identity-only facts
+
+### 10.8 Edge Deduplication Tests
+
+- Repeated extraction yields 1 relationship row
+- Multiple mentions produce multiple `episode_relationship_mentions`
+- Different `valid_at` values create distinct relationship rows
+
+### 10.9 Contradiction Detection Tests
+
+- Contradicting statements set `invalid_at` on old relationship
+- Uses episode timestamp if explicit date not provided
+- Old relationships are retained (audit preserved)
+
+### 10.10 Mentions & Provenance Tests
+
+- `episode_entity_mentions` created for each entity
+- `episode_relationship_mentions` created for each relationship
+- `asserted_by_entity_id` set when speaker is known
+- `source_type` reflects self_disclosed / mentioned / inferred
+
+### 10.11 Contact Import + Merge Tests
+
+- Identifier overlap triggers auto-merge
+- Name-only overlap creates merge_candidate (no auto-merge)
+- Shared aliases do not generate merge_candidates
+
+### 10.12 Query Layer Tests
+
+- "Who works at Anthropic?" returns expected people
+- "Where does Casey live?" returns expected location
+- Temporal queries respect valid_at/invalid_at
+
+### 10.13 Idempotency Tests
+
+- Reprocessing the same episode yields **no new entities or relationships**
+- Only mentions may increase (if deduped per episode)
+
+### 10.14 Performance Guards
+
+- Process N=1,000 episodes under target runtime
+- Collision detection runs in O(F) time
+
+---
+
+## Part 11: Verification Harness (Real Data Fixtures)
+
+This section defines the **verification harness** that runs the test suite using real data fixtures
+from your sources (aix, gog, imessage). The goal is to validate system behavior on realistic data
+and make it easy to "vibe check" results with your own messages.
+
+### 11.1 Harness Structure
+
+**Directory layout (proposed):**
+
+```
+fixtures/
+  manifest.yaml
+  aix/
+    <fixture_id>/
+      episode.json
+      expectations.yaml
+  gog/
+    <fixture_id>/
+      episode.json
+      expectations.yaml
+  imessage/
+    <fixture_id>/
+      episode.json
+      expectations.yaml
+reports/
+  latest/
+    summary.md
+    failures.md
+    graph_diff.json
+```
+
+**episode.json (input):**
+```json
+{
+  "fixture_id": "imessage-01-job-change",
+  "source": "imessage",
+  "channel": "messages",
+  "participants": ["Tyler", "Casey"],
+  "reference_time": "2026-01-21T10:05:00-06:00",
+  "episode_content": "Tyler: I left Intent Systems in December and joined Anthropic."
+}
+```
+
+**expectations.yaml (assertions):**
+```yaml
+entities:
+  must_have:
+    - {name: "Tyler", type: "Person"}
+    - {name: "Anthropic", type: "Company"}
+  must_not_have:
+    - {name: "Claude", type: "Person"}
+relationships:
+  must_have:
+    - {source: "Tyler", type: "WORKS_AT", target: "Anthropic", valid_at: "2026-01"}
+    - {source: "Tyler", type: "WORKS_AT", target: "Intent Systems", invalid_at: "2025-12"}
+aliases:
+  must_have: []
+mentions:
+  require_asserted_by: true
+```
+
+**Matching rules:**
+- `must_have` = required outputs
+- `must_not_have` = forbidden outputs
+- `optional` = allowed but not required (tolerate LLM variance)
+- Relationship matching uses (source name, relation_type, target literal/entity)
+
+### 11.2 Harness Execution Flow
+
+1. Load fixture episodes from `fixtures/*/*/episode.json`
+2. Run full pipeline: extract → resolve → promote → dedupe → persist
+3. Compare outputs against `expectations.yaml`
+4. Generate reports: pass/fail + diffable summaries
+5. Re-run all fixtures to verify idempotency
+
+### 11.3 Real Data Fixture Selection (What to Capture)
+
+The fixtures should cover **variation** in:
+- Source (aix, gog, imessage)
+- Channel type (DM, group, email)
+- Identity markers (email/phone/handle)
+- Temporal information (absolute + relative dates)
+- Contradictions (job changes, moving locations)
+- Merge ambiguity (same name, shared identifiers)
+
+#### AIX Fixtures (structured/internal notes)
+
+Focus on **personal facts** and **project updates**:
+- Job change + start date (temporal literals)
+- Location mention (city or address)
+- Project updates with ownership (WORKING_ON / BUILDING)
+- Event planning (SCHEDULED_FOR)
+
+**Example cases:**
+- "I started Nexus in January"
+- "Meeting with Casey next Tuesday"
+- "Moved to Austin last year"
+
+#### GOG Fixtures (email/contact data)
+
+Focus on **identity extraction** and **signature parsing**:
+- Email signature with phone + handle
+- Role/company change mentioned in email
+- Attending/hosting an event (calendar invite)
+- Thread where multiple people share same first name
+
+**Example cases:**
+- Signature: "— Casey Adams | c.adams@example.com | +1‑555‑123‑4567"
+- "I left Intent Systems and joined Anthropic"
+
+#### iMessage Fixtures (chat data)
+
+Focus on **relationship and social context**:
+- Group chat with multiple participants
+- Nicknames and aliases ("Mom", "Dad")
+- Shared identifier (family phone)
+- Scheduling + rescheduling with relative dates
+- Contradiction detection (job/location change)
+
+**Example cases:**
+- "Our home number is 555‑1234"
+- "I'm in Austin now, moved last month"
+- "Dinner next Friday" (relative date)
+
+### 11.4 Fixture Coverage Matrix
+
+| Feature | AIX | GOG | iMessage |
+|---------|-----|-----|----------|
+| Identity literals | ✓ | ✓ | ✓ |
+| Temporal literals | ✓ | ✓ | ✓ |
+| Contradictions | ✓ | ✓ | ✓ |
+| Shared identifiers | – | ✓ | ✓ |
+| Ambiguous names | – | ✓ | ✓ |
+| Event attendance | ✓ | ✓ | ✓ |
+| Document references | ✓ | ✓ | – |
+
+### 11.5 Evaluation Outputs (Vibe Check)
+
+Produce a human-readable report per fixture:
+- Entities created / reused
+- Relationships created / invalidated
+- Aliases added (with is_shared flag)
+- Merge candidates generated
+- Diffs vs expected output
+
+This makes it easy to skim and validate that **the system feels right**.
+
+---
+
+## Part 12: Open Questions
 
 ### Resolved in This Spec
 
@@ -1441,7 +1723,7 @@ cortex identify status
 | Contacts integration? | **Pre-seeded entities** (generalizes People/Contacts) |
 | Chunking naming? | **Generic strategies** (not channel-specific) |
 | Episode lookback? | **Configurable** per episode_definition |
-| Previous memory influence? | **Resolution-time context** (not extraction-time) |
+| Previous memory influence? | **Graph-independent extraction** with resolution-time context |
 | Entity source field? | **origin** = how created, channels derived from episodes |
 | Separate embedding tables? | **Unified** embeddings table with target_type |
 | Multiple Tylers problem? | **Context scoring + conservative merging** |
@@ -1449,13 +1731,20 @@ cortex identify status
 | PII extraction? | **Unified** with entity extraction |
 | Entity summaries? | **Lazy generation** (deferred) |
 | Relationship type taxonomy? | **Free-form strings** (taxonomy evolution later) |
-| Emails/phones as entities or aliases? | **Aliases (can be shared across entities)** |
+| Emails/phones as entities or aliases? | **Aliases via target_literal** (not entities) |
 | person_facts migration? | **Mapped to relationships + identity promotion** |
 | Auto-merge rules? | **Defined in Part 8** |
 | Track candidates considered? | **Yes**, stored in merge_candidates.candidates_considered |
-| Entity types? | **Configurable**, defaults: Person, Company, Project, Location, Event, Document, Pet |
-| Soft facts (birthdate, profession)? | **entity.attributes** JSON field |
+| Entity types? | **8 types**: Person, Company, Project, Location, Event, Document, Pet, Entity (fallback) |
+| Dates? | **Not entities** — stored as `target_literal` on temporal relationships (ISO 8601) |
+| AI agents? | **Not entities** — no durable identity; AI chat content lives in episodes |
+| Concepts/activities/professions? | **Not entities** — discoverable via episode embedding search |
 | Shared identifiers? | **Aliases can be shared** (is_shared=TRUE) |
+| AI chat logs? | AI agents are NOT entities (no durable identity); extract human ideas/facts from chats |
+| Unified vs split extraction? | **Split** (Graphiti-style: entities first, then relationships) |
+| Bi-temporal model? | **Yes**: valid_at/invalid_at for real-world time, created_at for system time |
+| Date format? | **ISO 8601** (YYYY-MM-DD, YYYY-MM for month precision) |
+| Negation handling? | **None explicit** — LLM infers appropriate relationship type |
 
 ### Still Open
 
@@ -1471,20 +1760,22 @@ cortex identify status
 
 ## Appendix A: Prompts Reference
 
-All prompts live in `prompts/graphiti/`:
+All prompts live in `prompts/graphiti/`. See `prompts/graphiti/README.md` for detailed documentation.
+
+**Core pipeline prompts (in order):**
 
 | Prompt | Purpose |
 |--------|---------|
-| `extract-entities-message.prompt.md` | Entity extraction from messages |
-| `extract-entities-text.prompt.md` | Entity extraction from plain text |
-| `extract-relationships.prompt.md` | Relationship triple extraction |
-| `extract-dates.prompt.md` | Temporal bounds refinement |
-| `resolve-entities.prompt.md` | Entity deduplication |
-| `resolve-edges.prompt.md` | Relationship deduplication |
-| `detect-contradictions.prompt.md` | Find contradicted facts |
-| `reflexion-entities.prompt.md` | Self-check for missed entities |
-| `reflexion-relationships.prompt.md` | Self-check for missed relationships |
-| `summarize-entity.prompt.md` | Entity summary generation |
+| `extract-entities.prompt.md` | Extract entities from episode content |
+| `extract-relationships.prompt.md` | Extract relationships (uses resolved entity UUIDs) |
+| `resolve-edges.prompt.md` | Deduplicate relationships against existing edges |
+| `detect-contradictions.prompt.md` | Find and invalidate contradicted facts |
+
+**Optional/deferred prompts:**
+
+| Prompt | Purpose |
+|--------|---------|
+| `summarize-entity.prompt.md` | Entity summary generation (deferred) |
 
 ---
 
