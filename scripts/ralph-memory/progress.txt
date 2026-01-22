@@ -512,3 +512,41 @@
 - MergeCandidate struct needs to include conflicts field for storing detected conflicts
 - Use pointers for optional string fields in structs (ResolvedAt, ResolvedBy, etc.)
 
+---
+## 2026-01-21 - [MS-019] Implement full extraction pipeline
+- Created MemoryPipeline struct that orchestrates the complete memory extraction flow
+- Pipeline steps in order:
+  1. Entity extraction (graph-independent via LLM)
+  2. Entity resolution (with graph context: aliases, embeddings, co-mentions)
+  3. Relationship extraction (graph-independent via LLM)
+  4. Identity promotion (HAS_EMAIL, HAS_PHONE → entity_aliases)
+  5. Edge resolution (relationship deduplication)
+  6. Contradiction detection (invalidate stale exclusive relationships)
+  7. Embedding generation (for new entities)
+  8. Episode mentions (episode_entity_mentions creation)
+- Idempotency: episode considered "processed" if it has any entity mentions
+- Configurable via PipelineConfig: extraction model, embedding model, skip embeddings, lookback episodes
+- Helper methods: ProcessBatch, GetStats
+- PipelineResult tracks: extracted/resolved entities, new/existing counts, mentions created, duration
+
+**Files changed:**
+- `internal/memory/pipeline.go` - MemoryPipeline implementation (420 lines)
+- `internal/memory/pipeline_test.go` - 12 unit tests (745 lines)
+
+**Learnings:**
+- Pipeline orchestration is about composing existing components, not adding new logic
+- Idempotency check via episode_entity_mentions is simple and effective
+- Non-fatal errors (embedding generation, contradiction detection) should not fail the pipeline
+- EpisodeInput struct abstracts episode data - doesn't need to know about DB schema
+- GetStats method provides quick health check of the memory graph
+- Time-bounded episode lookback requires careful SQL: ORDER BY start_time DESC LIMIT N
+- Episode content retrieval joins episode_events → events to get content
+
+### Pipeline Orchestration Pattern
+- Component initialization in constructor (all components created upfront)
+- Process method follows spec order exactly (steps 1-8 from §4.1)
+- Each step can fail independently; use early returns
+- Non-critical steps (embeddings, contradictions) wrapped in error-swallowing blocks
+- Result struct aggregates counts from all component results
+- Batch processing is just a loop over Process()
+

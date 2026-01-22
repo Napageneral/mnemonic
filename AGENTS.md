@@ -392,6 +392,13 @@ cortex chunk run imessage_3hr --json
 - Mention merging: INSERT OR REPLACE sums mention_counts when both entities mentioned in same episode
 - merge_candidates status: pending → merged/rejected/deferred with resolved_at, resolved_by, resolution_reason
 - entity_merge_events: audit trail of executed merges with triggering_facts, similarity_score
+- Memory pipeline: MemoryPipeline orchestrates full extraction flow (extract → resolve → relationships → promote → edges → contradictions → embeddings → mentions)
+- Pipeline steps: 1) extract entities (LLM), 2) resolve entities (graph), 3) extract relationships (LLM), 4) promote identity, 5) resolve edges, 6) detect contradictions, 7) generate embeddings, 8) create mentions
+- Pipeline idempotency: episode considered "processed" if it has any episode_entity_mentions records
+- PipelineConfig: extraction model, embedding model, skip embeddings flag, lookback episodes count
+- PipelineResult: tracks extracted/resolved counts, new/existing entities/relationships, mentions, contradictions, duration
+- Pipeline error handling: non-fatal errors (embeddings, contradictions) don't fail the whole pipeline
+- GetStats: aggregate stats for memory graph (total entities, relationships, aliases, mentions, contradictions)
 
 ## Schema Quick Reference
 
