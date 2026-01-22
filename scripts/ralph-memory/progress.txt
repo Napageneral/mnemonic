@@ -368,3 +368,31 @@
 - Provenance: always create episode_relationship_mentions, even if no alias created
 - Non-identity relationships pass through to EdgeResolver
 
+---
+## 2026-01-21 - [MS-015] Implement edge resolution (relationship dedup)
+- Created EdgeResolver that deduplicates relationships before inserting
+- Matches on: source_entity_id, target (entity_id or literal), relation_type, valid_at
+- If relationship exists: create episode_relationship_mentions only (no duplicate row)
+- If new: create relationship row + episode_relationship_mentions
+- Different valid_at values create distinct relationships (supports job changes, multiple stints)
+- Skips identity relationships (handled by IdentityPromoter)
+- Supports speaker attribution via asserted_by_entity_id
+
+**Files changed:**
+- `internal/memory/edge_resolver.go` - EdgeResolver implementation with Resolve and ResolveWithAssertedBy methods
+- `internal/memory/edge_resolver_test.go` - 11 unit tests covering all dedup scenarios
+
+**Learnings:**
+- NULL valid_at matching requires special SQL handling: `(valid_at IS NULL AND ? IS NULL OR valid_at = ?)`
+- Relationship uniqueness is defined by (source, target, type, valid_at) - not just (source, target, type)
+- Different valid_at values are intentional for representing temporal changes (e.g., multiple job stints)
+- episode_relationship_mentions preserves the original extracted_fact phrasing even when deduplicated
+- Test helper function naming must be unique across test files in the same package
+
+### Edge Resolution Pattern
+- Dedup key: (source_entity_id, target_entity_id/target_literal, relation_type, valid_at)
+- NULL valid_at matches other NULL valid_at (not arbitrary dates)
+- Always create episode_relationship_mentions for provenance tracking
+- Identity relationships (HAS_EMAIL, etc.) should be filtered out before EdgeResolver (handled by IdentityPromoter)
+- Different phrasings of the same fact are preserved in mentions for debugging/review
+
