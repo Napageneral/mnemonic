@@ -30,6 +30,13 @@
 - **JSON**: Can keep `segment_id` in JSON for backward compatibility with queued jobs
 - **CLI output**: Use "episodes" in user-facing messages
 
+### LLM Integration (Gemini)
+- Use `internal/gemini` package for Gemini API calls
+- `GenerateContentRequest` with `ResponseMimeType: "application/json"` for structured output
+- Response text is in `resp.Candidates[0].Content.Parts[0].Text`
+- Prompts are built programmatically in Go (no separate template engine)
+- For memory extraction: prompts live in `prompts/graphiti/*.prompt.md` for documentation, but code builds them
+
 ---
 
 ## Progress Log
@@ -222,4 +229,142 @@
 - Helper functions return pointers to enable nil checks for invalid IDs/names
 - Constants provide type safety and make code more readable than magic numbers
 - Returning pointer to slice element (not copy) keeps memory efficient for lookups
+
+---
+## 2026-01-21 - [MS-010] Implement entity extraction prompt runner
+- Created EntityExtractor struct that runs extract-entities.prompt.md via Gemini client
+- Defined ExtractedEntity with temporary ID (0, 1, 2...), name, and entity_type_id
+- EntityExtractionInput includes: EpisodeContent, ReferenceTime, PreviousEpisodes, CustomInstructions
+- Implemented prompt builder following the exact template from extract-entities.prompt.md
+- Uses Gemini's ResponseMimeType: "application/json" for structured output
+- Added EntityTypesJSON helper to inject entity types into prompt
+- Invalid entity_type_id values are defaulted to Entity(0) during parsing
+- Empty episode content returns empty result without LLM call
+
+**Files changed:**
+- `internal/memory/entity_extractor.go` - EntityExtractor implementation
+- `internal/memory/entity_extractor_test.go` - Unit tests for parsing and prompt building
+
+**Learnings:**
+- Gemini's ResponseMimeType: "application/json" forces JSON-only output, eliminating markdown/explanation
+- extractTextFromResponse helper centralizes response text extraction from Gemini's nested structure
+- Graph-independent extraction means no database queries during extraction - resolution comes later
+- Temporary IDs (0, 1, 2...) are local to each extraction; resolution assigns real UUIDs
+- Testing LLM integrations requires either HTTP mocking or testing parsing logic separately
+- The prompt template in extract-entities.prompt.md uses Handlebars-style placeholders ({{...}})
+
+---
+## 2026-01-21 - [MS-011] Implement entity embedding generation
+- Created EntityEmbedder struct that generates and stores embeddings for entity canonical names
+- Uses Gemini's EmbedContent API via gemini.Client
+- Stores embeddings in unified embeddings table with target_type='entity'
+- Implements source_text_hash for change detection - skips if embedding already exists with same hash
+- GetEntitiesNeedingEmbeddings helper finds entities without up-to-date embeddings
+- EmbedEntities batch method for processing multiple entities
+- Excludes merged entities (merged_into IS NOT NULL) from embedding generation
+
+**Files changed:**
+- `internal/memory/entity_embedder.go` - EntityEmbedder implementation with Gemini integration
+- `internal/memory/entity_embedder_test.go` - Comprehensive unit tests for all functionality
+
+**Learnings:**
+- The embeddings table uses `source_text_hash` for change detection - if the canonical_name changes, the hash changes, triggering re-embedding
+- ON CONFLICT clause with DO UPDATE handles both insert and update in a single statement
+- gemini.EmbedContentRequest takes a Model field that specifies the embedding model
+- Entity embeddings use same blob format as other embeddings (little-endian float64 array)
+- Helper functions hashText and float64SliceToBlob already existed in compute/engine.go but were duplicated in memory package for independence
+- Tests don't need actual Gemini client - can test database operations with nil client by testing helper methods directly
+
+---
+## 2026-01-21 - [MS-012] Implement entity resolution with alias matching
+- Created EntityResolver struct that resolves extracted entities against the existing graph
+- Implements 3-step resolution: alias match → embedding similarity → context scoring
+- Step 1: Exact alias match searches entity_aliases by normalized value
+  - Email/phone matches get AliasEmailMatchWeight (0.95)
+  - Name matches get AliasNameMatchWeight (0.85)
+  - Shared aliases get reduced confidence (* 0.7)
+- Step 2: Embedding similarity search via cosine similarity (min 0.85 threshold)
+- Step 3: Context scoring based on:
+  - Relationship overlap with co-mentioned entities (+0.3 weight)
+  - Channel recency - recent mentions in same channel (+0.2 weight)
+- Decision logic:
+  - High confidence (>0.9) → use existing entity
+  - Exact alias match (score=1.0) → use existing entity
+  - Clear winner (single candidate or gap >=0.15) → use existing entity
+  - Ambiguous → create new entity + entity_merge_candidates for human review
+- Returns uuid_map{} mapping temporary IDs (0, 1, 2...) to resolved UUIDs
+- Creates entity_aliases for new entities automatically
+- CRITICAL: Conservative strategy - prefer duplicates over false merges
+
+**Files changed:**
+- `internal/memory/entity_resolver.go` - EntityResolver with full resolution logic
+- `internal/memory/entity_resolver_test.go` - 16 unit tests covering all resolution paths
+
+**Learnings:**
+- Resolution requires weighted scoring across multiple signals (alias, embedding, context)
+- cosineSimilarity and blobToFloat64Slice duplicated from search package to avoid circular imports
+- Merged entities (merged_into IS NOT NULL) must be excluded from candidate search
+- Context scoring uses relationships table and episode_entity_mentions for signals
+- Creating merge_candidates enables human review of ambiguous cases without blocking resolution
+- Entity types aren't used for filtering during resolution - allows "Tyler" person to match "Tyler" company
+- The normalizeAlias function uses lowercase + trim for consistent matching
+- Single-candidate matches with reasonable score should resolve (not create duplicates)
+
+---
+## 2026-01-21 - [MS-013] Implement relationship extraction prompt runner
+- Created RelationshipExtractor struct that runs extract-relationships.prompt.md via Gemini client
+- Defined ExtractedRelationship with source_entity_id, relation_type, target_entity_id/target_literal, fact, source_type, valid_at, invalid_at
+- RelationshipExtractionInput includes resolved entities with UUIDs; LLM receives temp IDs (0, 1, 2...) for reference
+- Implemented prompt builder following exact template from extract-relationships.prompt.md
+- Added ResolvedEntityForPrompt struct to format entities for LLM consumption (id, uuid, name, entity_type)
+- Created validateRelationships to filter invalid relationships: out-of-range IDs, empty fields, invalid source_type
+- Added type classification helpers: isIdentityRelationType, isTemporalRelationType, IsLiteralTargetRelationType
+- Added UUID mapping helpers: GetSourceEntityUUID, GetTargetEntityUUID for converting temp IDs to real UUIDs
+- Validation handles both-targets-set case by preferring literal for identity/temporal types, entity for others
+
+**Files changed:**
+- `internal/memory/relationship_extractor.go` - RelationshipExtractor implementation
+- `internal/memory/relationship_extractor_test.go` - Comprehensive unit tests (16+ test cases)
+- `AGENTS.md` - Added relationship extraction patterns
+
+**Learnings:**
+- Relationship extraction is graph-independent like entity extraction; dedup happens at edge resolution
+- The prompt template passes resolved entities with UUIDs but LLM uses temp IDs (0, 1, 2...) for compactness
+- target_literal is used for identity relationships (promoted to aliases) and temporal relationships (dates)
+- source_type distinguishes self_disclosed (highest confidence), mentioned (someone else said it), inferred (implied)
+- Validation must handle LLMs returning both target_entity_id and target_literal simultaneously
+- Test helper functions (contains) should not be redeclared across test files in same package
+
+---
+## 2026-01-21 - [MS-014] Implement identity promotion (target_literal → aliases)
+- Created IdentityPromoter that processes identity relationships and promotes them to aliases
+- Identity relationship types: HAS_EMAIL, HAS_PHONE, HAS_HANDLE, HAS_USERNAME, ALSO_KNOWN_AS
+- Each type maps to an alias type: email, phone, handle, username, nickname
+- Only promotes to alias when source_type = 'self_disclosed' (highest confidence)
+- Non-self_disclosed still creates episode_relationship_mentions for provenance, but no alias
+- Detects shared aliases (same normalized value, multiple entities) and marks is_shared=TRUE
+- Deduplicates aliases for same entity (multiple episodes mentioning same identity)
+- Creates episode_relationship_mentions with target_literal and alias_id for provenance
+- Does NOT create relationships table rows for identity-only facts (that's the whole point)
+- Returns NonIdentityRels for the EdgeResolver to handle (separation of concerns)
+- Normalizes values by type: lowercase for email/handle/username/nickname, strip formatting for phone
+
+**Files changed:**
+- `internal/memory/identity_promoter.go` - IdentityPromoter implementation
+- `internal/memory/identity_promoter_test.go` - Comprehensive unit tests (10 test cases)
+
+**Learnings:**
+- Identity relationships are fundamentally different from entity relationships - they create aliases, not graph edges
+- Only self_disclosed facts should create aliases (high confidence); mentioned/inferred just track provenance
+- Shared alias detection must update ALL existing aliases with same value, not just the new one
+- Test helper functions in the same package can collide - need unique names per test file (setupIdentityPromoterTestDB)
+- The normalizeIdentityValue function handles type-specific normalization (phones need different treatment than emails)
+- episode_relationship_mentions.relationship_id is NULL for identity promotions; alias_id is set instead
+
+### Identity Promotion Pattern
+- Identity types map to alias types: HAS_EMAIL→email, HAS_PHONE→phone, HAS_HANDLE→handle, HAS_USERNAME→username, ALSO_KNOWN_AS→nickname
+- Promotion gate: source_type must be 'self_disclosed' to create/update alias
+- Shared detection: after inserting, check for same normalized+alias_type across entities
+- Provenance: always create episode_relationship_mentions, even if no alias created
+- Non-identity relationships pass through to EdgeResolver
 

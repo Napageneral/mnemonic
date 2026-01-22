@@ -367,6 +367,13 @@ cortex chunk run imessage_3hr --json
 - source_type values: 'self_disclosed' (person said it about themselves), 'mentioned' (someone else said it), 'inferred' (implied but not explicit)
 - Relationship validation: filters invalid source/target IDs, empty fields; defaults empty source_type to 'mentioned'
 - GetSourceEntityUUID/GetTargetEntityUUID helpers map temp IDs to real UUIDs for storage
+- Identity promotion: IdentityPromoter processes HAS_EMAIL/HAS_PHONE/HAS_HANDLE/HAS_USERNAME/ALSO_KNOWN_AS relationships
+- Identity promotion gate: only source_type='self_disclosed' creates/updates entity_aliases (high confidence)
+- Identity alias types: HAS_EMAIL→email, HAS_PHONE→phone, HAS_HANDLE→handle, HAS_USERNAME→username, ALSO_KNOWN_AS→nickname
+- Shared alias detection: after inserting alias, check for same normalized+alias_type across entities, mark is_shared=TRUE
+- Identity provenance: always create episode_relationship_mentions (with target_literal+alias_id), even for non-self_disclosed
+- Identity relationships do NOT create rows in relationships table - they go to entity_aliases instead
+- IdentityPromoter.Promote() returns NonIdentityRels for EdgeResolver to handle (separation of concerns)
 
 ## Schema Quick Reference
 

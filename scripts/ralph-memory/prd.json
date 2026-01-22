@@ -149,8 +149,8 @@
         "Unit test with mock LLM response"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": "See MEMORY_SYSTEM_SPEC.md §4.1 step 1. Graph-independent extraction."
+      "passes": true,
+      "notes": "See MEMORY_SYSTEM_SPEC.md §4.1 step 1. Graph-independent extraction. Completed: EntityExtractor with Gemini client integration, prompt builder, JSON response parsing, entity type validation, and comprehensive tests."
     },
     {
       "id": "MS-011",
@@ -164,8 +164,8 @@
         "Unit test with mock embedder"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": "See MEMORY_SYSTEM_SPEC.md §4.1 step 7. Embeddings for similarity search."
+      "passes": true,
+      "notes": "See MEMORY_SYSTEM_SPEC.md §4.1 step 7. Embeddings for similarity search. Completed: EntityEmbedder with Gemini integration, source_text_hash for change detection, GetEntitiesNeedingEmbeddings helper, and comprehensive tests."
     },
     {
       "id": "MS-012",
@@ -183,8 +183,8 @@
         "Unit tests for each resolution path"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": "See MEMORY_SYSTEM_SPEC.md §4.2. Conservative - prefer duplicates over false merges."
+      "passes": true,
+      "notes": "See MEMORY_SYSTEM_SPEC.md §4.2. Conservative - prefer duplicates over false merges. Completed: EntityResolver with 3-step resolution (alias match, embedding similarity, context scoring), decision logic with uuid_map output, and comprehensive tests for all paths."
     },
     {
       "id": "MS-013",
@@ -198,8 +198,8 @@
         "Unit test with mock LLM response"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": "See MEMORY_SYSTEM_SPEC.md §4.1 step 3. Receives resolved entity UUIDs."
+      "passes": true,
+      "notes": "See MEMORY_SYSTEM_SPEC.md §4.1 step 3. Receives resolved entity UUIDs. Completed: RelationshipExtractor with Gemini integration, prompt builder for resolved entities, JSON parsing, validation, and UUID mapping helpers."
     },
     {
       "id": "MS-014",
@@ -215,8 +215,8 @@
         "Unit tests for promotion, shared detection"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": "See MEMORY_SYSTEM_SPEC.md §4.4. Identity relationships go to aliases, not relationships table."
+      "passes": true,
+      "notes": "See MEMORY_SYSTEM_SPEC.md §4.4. Identity relationships go to aliases, not relationships table. Completed: IdentityPromoter with Promote method, shared alias detection, type-specific normalization, provenance tracking, and comprehensive tests."
     },
     {
       "id": "MS-015",
