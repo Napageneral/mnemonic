@@ -639,9 +639,37 @@ CREATE TABLE IF NOT EXISTS episode_entity_mentions (
 
 CREATE INDEX IF NOT EXISTS idx_episode_entity_mentions_entity ON episode_entity_mentions(entity_id);
 
+-- ============================================
+-- EPISODE-RELATIONSHIP MENTIONS (provenance for relationships)
+-- ============================================
+-- Junction table: many-to-many between episodes and relationships.
+-- Same relationship mentioned in 10 episodes = 10 records here.
+-- Used for: frequency signals, provenance, confidence boosting.
+--
+-- relationship_id is NULL for identity relationships (HAS_EMAIL, HAS_PHONE, etc.)
+-- that go to entity_aliases instead of the relationships table.
+CREATE TABLE IF NOT EXISTS episode_relationship_mentions (
+    id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    relationship_id TEXT REFERENCES relationships(id) ON DELETE CASCADE,  -- NULL for identity relationships
+    extracted_fact TEXT NOT NULL,  -- Original extracted text (raw, pre-dedup)
+    asserted_by_entity_id TEXT REFERENCES entities(id),  -- Speaker who made the statement
+    source_type TEXT,  -- 'self_disclosed', 'mentioned', 'inferred'
+
+    -- For identity relationships (HAS_EMAIL, etc.) that go to aliases instead
+    target_literal TEXT,  -- The literal value (email, phone, etc.)
+    alias_id TEXT REFERENCES entity_aliases(id) ON DELETE SET NULL,  -- Link to created alias
+
+    confidence REAL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_episode_rel_mentions_episode ON episode_relationship_mentions(episode_id);
+CREATE INDEX IF NOT EXISTS idx_episode_rel_mentions_relationship ON episode_relationship_mentions(relationship_id);
+
 -- Insert initial schema version
 INSERT OR IGNORE INTO schema_version (version, applied_at)
-VALUES (17, strftime('%s', 'now'));
+VALUES (18, strftime('%s', 'now'));
 
 -- NOTE: pii_extraction_v1 analysis type is now registered via `cortex compute seed` command
 -- This matches the pattern used for convo-all-v1 and is more maintainable

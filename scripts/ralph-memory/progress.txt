@@ -135,3 +135,23 @@
 - The mention_count column enables tracking how many times an entity is referenced within an episode (useful for relevance scoring)
 - Table positioned after relationships and before upcoming episode_relationship_mentions to maintain logical grouping
 
+---
+## 2026-01-21 - [MS-006] Add episode_relationship_mentions table to schema
+- Added `episode_relationship_mentions` table to schema.sql following spec §3.4
+- Columns: id, episode_id (FK), relationship_id (FK nullable), extracted_fact, asserted_by_entity_id (FK nullable), source_type, target_literal, alias_id (FK nullable), confidence, created_at
+- relationship_id is nullable because identity relationships (HAS_EMAIL, HAS_PHONE, HAS_HANDLE) go to entity_aliases instead of relationships table
+- Added ON DELETE CASCADE for episode_id and relationship_id FKs
+- Added ON DELETE SET NULL for alias_id FK (preserve provenance even if alias is later deleted)
+- Added indexes: idx_episode_rel_mentions_episode (episode_id), idx_episode_rel_mentions_relationship (relationship_id)
+- Schema version incremented from 17 to 18
+
+**Files changed:**
+- `internal/db/schema.sql` - Added episode_relationship_mentions table and indexes
+
+**Learnings:**
+- episode_relationship_mentions is a "provenance table" - it tracks WHERE facts came from, even if the same fact is extracted multiple times
+- Identity relationships (HAS_EMAIL, HAS_PHONE) populate this table with relationship_id=NULL and alias_id pointing to the created alias
+- The extracted_fact column preserves the original text (pre-dedup), useful for debugging and taxonomy evolution
+- asserted_by_entity_id enables tracking WHO said something (speaker attribution) vs the episode itself
+- source_type ('self_disclosed', 'mentioned', 'inferred') is critical for confidence scoring - self_disclosed facts are higher confidence
+

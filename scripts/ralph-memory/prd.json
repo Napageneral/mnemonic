@@ -90,8 +90,8 @@
         "go build succeeds"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "See MEMORY_SYSTEM_SPEC.md §3.4. Provenance for relationships. relationship_id NULL for identity-only facts."
+      "passes": true,
+      "notes": "See MEMORY_SYSTEM_SPEC.md §3.4. Provenance for relationships. relationship_id NULL for identity-only facts. Completed: Added table with all columns per spec, ON DELETE CASCADE for episode/relationship FKs, ON DELETE SET NULL for alias FK."
     },
     {
       "id": "MS-007",
