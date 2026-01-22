@@ -502,7 +502,7 @@ func (r *EntityResolver) makeDecision(ctx context.Context, ext ExtractedEntity, 
 	}
 
 	// Create merge candidate for human review
-	if err := r.createMergeCandidate(ctx, entity.ID, topCandidate, ext.Name); err != nil {
+	if err := r.createMergeCandidate(ctx, entity.ID, topCandidate, ext.Name, candidates); err != nil {
 		// Log but don't fail - the entity was created
 		_ = err
 	}
@@ -549,7 +549,7 @@ func (r *EntityResolver) createNewEntity(ctx context.Context, ext ExtractedEntit
 }
 
 // createMergeCandidate creates a merge candidate for human review.
-func (r *EntityResolver) createMergeCandidate(ctx context.Context, newEntityID string, candidate ResolutionCandidate, extractedName string) error {
+func (r *EntityResolver) createMergeCandidate(ctx context.Context, newEntityID string, candidate ResolutionCandidate, extractedName string, allCandidates []ResolutionCandidate) error {
 	id := uuid.New().String()
 	now := time.Now().Format(time.RFC3339)
 
@@ -565,10 +565,25 @@ func (r *EntityResolver) createMergeCandidate(ctx context.Context, newEntityID s
 	}
 	contextJSON, _ := json.Marshal(context)
 
+	// Track all candidates considered for debugging
+	candidatesConsidered := make([]map[string]interface{}, 0, len(allCandidates))
+	for _, c := range allCandidates {
+		candidatesConsidered = append(candidatesConsidered, map[string]interface{}{
+			"entity_id":   c.EntityID,
+			"name":        c.CanonicalName,
+			"total_score": c.TotalScore,
+		})
+	}
+	candidatesJSON, _ := json.Marshal(candidatesConsidered)
+
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO entity_merge_candidates (id, entity_a_id, entity_b_id, confidence, reason, context, status, created_at)
-		VALUES (?, ?, ?, ?, 'ambiguous_resolution', ?, 'pending', ?)
-	`, id, newEntityID, candidate.EntityID, candidate.TotalScore, string(contextJSON), now)
+		INSERT INTO merge_candidates (id, entity_a_id, entity_b_id, confidence, auto_eligible, reason, context, candidates_considered, status, created_at)
+		VALUES (?, ?, ?, ?, FALSE, 'ambiguous_resolution', ?, ?, 'pending', ?)
+		ON CONFLICT(entity_a_id, entity_b_id) DO UPDATE SET
+			confidence = excluded.confidence,
+			context = excluded.context,
+			candidates_considered = excluded.candidates_considered
+	`, id, newEntityID, candidate.EntityID, candidate.TotalScore, string(contextJSON), string(candidatesJSON), now)
 
 	return err
 }

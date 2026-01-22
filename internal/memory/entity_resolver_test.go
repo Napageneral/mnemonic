@@ -89,16 +89,23 @@ func setupResolverTestDB(t *testing.T) *sql.DB {
 			PRIMARY KEY (episode_id, entity_id)
 		);
 
-		CREATE TABLE entity_merge_candidates (
+		CREATE TABLE merge_candidates (
 			id TEXT PRIMARY KEY,
 			entity_a_id TEXT NOT NULL REFERENCES entities(id),
 			entity_b_id TEXT NOT NULL REFERENCES entities(id),
-			confidence REAL,
-			reason TEXT,
+			confidence REAL NOT NULL,
+			auto_eligible BOOLEAN DEFAULT FALSE,
+			reason TEXT NOT NULL,
+			matching_facts TEXT,
 			context TEXT,
+			candidates_considered TEXT,
+			conflicts TEXT,
 			status TEXT DEFAULT 'pending',
 			created_at TEXT NOT NULL,
-			resolved_at TEXT
+			resolved_at TEXT,
+			resolved_by TEXT,
+			resolution_reason TEXT,
+			UNIQUE(entity_a_id, entity_b_id)
 		);
 	`
 	_, err = db.Exec(schema)
@@ -454,7 +461,7 @@ func TestEntityResolver_AmbiguousMatch_CreatesMergeCandidate(t *testing.T) {
 	if resolved.IsNew && resolved.Decision == DecisionAmbiguous {
 		// Check merge candidate was created
 		var count int
-		err = db.QueryRow("SELECT COUNT(*) FROM entity_merge_candidates WHERE entity_a_id = ?", resolved.ID).Scan(&count)
+		err = db.QueryRow("SELECT COUNT(*) FROM merge_candidates WHERE entity_a_id = ?", resolved.ID).Scan(&count)
 		if err != nil {
 			t.Errorf("failed to check merge candidates: %v", err)
 		}

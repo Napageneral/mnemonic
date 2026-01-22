@@ -676,20 +676,38 @@ CREATE INDEX IF NOT EXISTS idx_episode_rel_mentions_relationship ON episode_rela
 -- ============================================
 -- When resolution is uncertain, create a merge candidate for human review.
 -- Better to have duplicates than false-merge corruption.
--- This is the entity-based version (replaces person-based merge_suggestions).
-CREATE TABLE IF NOT EXISTS entity_merge_candidates (
+CREATE TABLE IF NOT EXISTS merge_candidates (
     id TEXT PRIMARY KEY,
     entity_a_id TEXT NOT NULL REFERENCES entities(id),
     entity_b_id TEXT NOT NULL REFERENCES entities(id),
-    confidence REAL,
-    reason TEXT,  -- 'name_similarity', 'relationship_overlap', 'co_mention', 'hard_identifier', etc.
-    context TEXT, -- JSON with supporting evidence
-    status TEXT DEFAULT 'pending',  -- 'pending', 'merged', 'rejected'
+
+    -- Scoring
+    confidence REAL NOT NULL,         -- 0.0-1.0
+    auto_eligible BOOLEAN DEFAULT FALSE,
+
+    -- Evidence (why we think they match)
+    reason TEXT NOT NULL,             -- 'hard_identifier', 'name_similarity', 'compound', 'soft_accumulation', 'ambiguous_resolution'
+    matching_facts TEXT,              -- JSON: [{fact_type, fact_value}, ...]
+    context TEXT,                     -- JSON: additional evidence
+    candidates_considered TEXT,       -- JSON: top N candidates we scored (for debugging)
+
+    -- Conflicts (reasons NOT to merge)
+    conflicts TEXT,                   -- JSON: [{type, values_a, values_b}, ...]
+
+    -- Status
+    status TEXT DEFAULT 'pending',    -- 'pending', 'merged', 'rejected', 'deferred'
+
+    -- Resolution
     created_at TEXT NOT NULL,
-    resolved_at TEXT
+    resolved_at TEXT,
+    resolved_by TEXT,                 -- 'auto', 'user:<id>', etc.
+    resolution_reason TEXT,
+
+    UNIQUE(entity_a_id, entity_b_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_entity_merge_candidates_status ON entity_merge_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_merge_candidates_status ON merge_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_merge_candidates_auto ON merge_candidates(auto_eligible) WHERE status = 'pending';
 
 -- ============================================
 -- ENTITY MERGE EVENTS (audit log for entity merges)

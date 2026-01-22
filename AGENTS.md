@@ -357,7 +357,7 @@ cortex chunk run imessage_3hr --json
 - Entity types defined in code (internal/memory/entity_types.go), not in database
 - Entity resolution: EntityResolver implements 3-step resolution (alias match → embedding similarity → context scoring)
 - Resolution creates uuid_map{} mapping temp IDs to resolved UUIDs for relationship extraction
-- Conservative resolution strategy: prefer duplicates over false merges; ambiguous cases create entity_merge_candidates
+- Conservative resolution strategy: prefer duplicates over false merges; ambiguous cases create merge_candidates
 - Resolution excludes merged entities (merged_into IS NOT NULL) from candidate search
 - Relationship extraction: RelationshipExtractor runs after entity resolution with resolved UUIDs
 - RelationshipExtractor input includes resolved entities with UUIDs; LLM uses temp IDs (0, 1, 2...) for reference
@@ -402,7 +402,7 @@ entity_aliases  -- Identity markers (email, phone, handles) for resolution
 relationships   -- Triples with temporal bounds (source → relation → target)
 episode_entity_mentions    -- Junction: which entities appear in which episodes
 episode_relationship_mentions -- Provenance: which relationships extracted from which episodes
-entity_merge_candidates    -- Suspected duplicates for human review
+merge_candidates          -- Suspected duplicates for human review
 entity_merge_events       -- Audit trail of executed merges
 ```
 
