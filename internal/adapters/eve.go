@@ -52,40 +52,29 @@ func (e *EveAdapter) Name() string {
 	return "imessage"
 }
 
-// normalizePhoneEve normalizes phone numbers to E.164-ish format for consistent matching
+// normalizePhoneEve normalizes phone numbers to match Eve's normalizePhoneNumber format:
+// - Remove all non-digit chars
+// - If 11 digits starting with 1, drop the leading 1 (US numbers)
+// This matches Eve's internal normalization for consistent matching
 func normalizePhoneEve(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
-	// Keep + and digits only
+	// Remove all non-digit characters
 	var b strings.Builder
 	for _, r := range s {
-		if (r >= '0' && r <= '9') || r == '+' {
+		if r >= '0' && r <= '9' {
 			b.WriteRune(r)
 		}
 	}
-	out := b.String()
+	digits := b.String()
 
-	// Best-effort US normalization:
-	// - 10 digits -> +1XXXXXXXXXX
-	// - 11 digits starting with 1 -> +1XXXXXXXXXX
-	// - already has + -> leave
-	if strings.HasPrefix(out, "+") {
-		return out
-	}
-	digits := out
-	if len(digits) == 10 {
-		return "+1" + digits
-	}
+	// If it's a US number (11 digits starting with 1), remove the leading 1
 	if len(digits) == 11 && strings.HasPrefix(digits, "1") {
-		return "+" + digits
+		return digits[1:]
 	}
-	// For international numbers without +, just prepend +
-	if len(digits) > 10 {
-		return "+" + digits
-	}
-	return out
+	return digits
 }
 
 func (e *EveAdapter) Sync(ctx context.Context, cortexDB *sql.DB, full bool) (SyncResult, error) {
@@ -285,7 +274,7 @@ func (e *EveAdapter) syncContacts(ctx context.Context, eveDB, cortexDB *sql.DB) 
 	}
 	defer stmtInsertIdentity.Close()
 
-	for rows.Next() {
+		for rows.Next() {
 		var eveContactID int64
 		var name, nickname sql.NullString
 		var identifier, identifierType sql.NullString
@@ -294,25 +283,31 @@ func (e *EveAdapter) syncContacts(ctx context.Context, eveDB, cortexDB *sql.DB) 
 			return personsCreated, contactMap, mePersonID, perf, fmt.Errorf("failed to scan contact row: %w", err)
 		}
 
-		// Determine canonical name
-		canonicalName := "Unknown"
+		// Determine canonical name - never fall back to phone identifiers
+		canonicalName := "Unknown Contact"
 		if name.Valid && name.String != "" {
 			canonicalName = name.String
 		} else if nickname.Valid && nickname.String != "" {
 			canonicalName = nickname.String
-		} else if identifier.Valid && identifier.String != "" {
-			canonicalName = identifier.String
 		}
+		// Explicitly do NOT fall back to identifier - use "Unknown Contact" instead
 
-		// Check if person already exists (by identifier or by name)
+		// FIXED: First check if we already have a person for this Eve contact_id
+		// This handles contacts with multiple identifiers (phone + email)
 		var personID string
-		if identifier.Valid && identifierType.Valid {
-			// Try to find person by identifier
+		if existingPersonID, ok := contactMap[eveContactID]; ok {
+			personID = existingPersonID
+		} else if identifier.Valid && identifierType.Valid {
+			// Try to find person by identifier (normalize phone numbers to Eve format)
+			lookupIdent := identifier.String
+			if identifierType.String == "phone" {
+				lookupIdent = normalizePhoneEve(lookupIdent)
+			}
 			// Note: Use tx.QueryRow to avoid deadlock - SQLite doesn't allow concurrent access
 			row := tx.QueryRow(`
 				SELECT person_id FROM identities
 				WHERE channel = ? AND identifier = ?
-			`, identifierType.String, identifier.String)
+			`, identifierType.String, lookupIdent)
 			if err := row.Scan(&personID); err != nil && err != sql.ErrNoRows {
 				return personsCreated, contactMap, mePersonID, perf, fmt.Errorf("failed to query identity: %w", err)
 			}
@@ -336,7 +331,7 @@ func (e *EveAdapter) syncContacts(ctx context.Context, eveDB, cortexDB *sql.DB) 
 			identityID := uuid.New().String()
 			now := time.Now().Unix()
 
-			// Normalize phone numbers for consistent matching
+			// Normalize phone numbers to Eve format for consistent matching
 			ident := identifier.String
 			if identifierType.String == "phone" {
 				ident = normalizePhoneEve(ident)
