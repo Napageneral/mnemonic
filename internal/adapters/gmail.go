@@ -35,6 +35,11 @@ type GmailAdapterOptions struct {
 	MaxThreadRetries int
 }
 
+const (
+	contentTypesTextJSON           = `["text"]`
+	contentTypesTextAttachmentJSON = `["text","attachment"]`
+)
+
 func (o GmailAdapterOptions) withDefaults() GmailAdapterOptions {
 	if o.Workers <= 0 {
 		o.Workers = 8
@@ -176,7 +181,7 @@ func (g *GmailAdapter) setHistoryID(db *sql.DB, historyID int64) {
 	_ = state.Set(db, g.Name(), "gmail_history_id", fmt.Sprintf("%d", historyID))
 }
 
-func (g *GmailAdapter) syncGmailStateAndTags(cortexDB *sql.DB, eventID string, labelIDs []string, direction string) error {
+func (g *GmailAdapter) syncGmailStateAndTags(cortexDB contacts.DBTX, eventID string, labelIDs []string, direction string) error {
 	now := time.Now().Unix()
 
 	// Replace current gmail tags for this event.
@@ -248,6 +253,20 @@ func (g *GmailAdapter) Sync(ctx context.Context, cortexDB *sql.DB, full bool) (S
 	// Enable foreign keys on cortex DB
 	if _, err := cortexDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		return result, fmt.Errorf("failed to enable foreign keys: %w", err)
+	}
+	// Pragmas for performance + concurrency.
+	_, _ = cortexDB.Exec("PRAGMA busy_timeout = 5000")
+	_, _ = cortexDB.Exec("PRAGMA journal_mode = WAL")
+	_, _ = cortexDB.Exec("PRAGMA synchronous = NORMAL")
+	// Aggressive full-sync pragmas (speed > durability during import).
+	// NOTE: If the machine crashes mid-import, the cortex DB could be left in a bad state.
+	if full {
+		_, _ = cortexDB.Exec("PRAGMA synchronous = OFF")
+		_, _ = cortexDB.Exec("PRAGMA temp_store = MEMORY")
+		_, _ = cortexDB.Exec("PRAGMA cache_size = -200000")         // ~200MB
+		_, _ = cortexDB.Exec("PRAGMA mmap_size = 268435456")        // 256MB
+		_, _ = cortexDB.Exec("PRAGMA wal_autocheckpoint = 1000000") // reduce checkpoints
+		_, _ = cortexDB.Exec("PRAGMA defer_foreign_keys = ON")
 	}
 	if err := g.ensureGmailStateTables(cortexDB); err != nil {
 		return result, err
@@ -847,55 +866,17 @@ func (g *GmailAdapter) syncThread(ctx context.Context, cortexDB *sql.DB, thread 
 		maxHistory = h
 	}
 
+	tx, err := cortexDB.Begin()
+	if err != nil {
+		return eventsCreated, eventsUpdated, personsCreated, maxHistory, fmt.Errorf("begin gmail thread tx: %w", err)
+	}
+	defer tx.Rollback()
+
 	for _, message := range thread.Messages {
 		if h, err := strconv.ParseInt(strings.TrimSpace(message.HistoryID), 10, 64); err == nil && h > maxHistory {
 			maxHistory = h
 		}
-		// Parse message timestamp (internalDate is Unix timestamp in milliseconds)
-		var timestamp int64
-		if _, err := fmt.Sscanf(message.InternalDate, "%d", &timestamp); err == nil {
-			timestamp = timestamp / 1000 // Convert milliseconds to seconds
-		} else {
-			timestamp = time.Now().Unix()
-		}
-
-		// Extract headers
-		headers := make(map[string]string)
-		for _, h := range message.Payload.Headers {
-			headers[strings.ToLower(h.Name)] = h.Value
-		}
-
-		from := headers["from"]
-		to := headers["to"]
-		cc := headers["cc"]
-		subject := decodeMIMEHeader(headers["subject"])
-
-		// Extract body content
-		body := decodeGmailBody(g.extractBody(message.Payload))
-		content := subject
-		if body != "" {
-			content = fmt.Sprintf("Subject: %s\n\n%s", subject, body)
-		}
-
-		// Build content types
-		contentTypes := []string{"text"}
-		if g.hasAttachments(message.Payload) {
-			contentTypes = append(contentTypes, "attachment")
-		}
-		contentTypesJSON, _ := json.Marshal(contentTypes)
-
-		// Determine direction based on SENT label
-		direction := "received"
-		for _, label := range message.LabelIDs {
-			if label == "SENT" {
-				direction = "sent"
-				break
-			}
-		}
-
-		// Upsert event with deterministic ID (no UUID churn).
-		eventID := fmt.Sprintf("%s:%s", g.Name(), message.ID)
-		created, updated, err := g.upsertEvent(cortexDB, eventID, timestamp, string(contentTypesJSON), content, direction, thread.ID, message.ID)
+		created, updated, participantsCreated, err := g.syncMessageWithDB(tx, message, cache)
 		if err != nil {
 			return eventsCreated, eventsUpdated, personsCreated, maxHistory, err
 		}
@@ -904,17 +885,11 @@ func (g *GmailAdapter) syncThread(ctx context.Context, cortexDB *sql.DB, thread 
 		} else if updated {
 			eventsUpdated++
 		}
-
-		// Process participants
-		participantsCreated, err := g.syncParticipants(cortexDB, eventID, from, to, cc, direction, cache)
-		if err != nil {
-			return eventsCreated, eventsUpdated, personsCreated, maxHistory, fmt.Errorf("failed to sync participants: %w", err)
-		}
 		personsCreated += participantsCreated
+	}
 
-		if err := g.syncGmailStateAndTags(cortexDB, eventID, message.LabelIDs, direction); err != nil {
-			return eventsCreated, eventsUpdated, personsCreated, maxHistory, err
-		}
+	if err := tx.Commit(); err != nil {
+		return eventsCreated, eventsUpdated, personsCreated, maxHistory, fmt.Errorf("commit gmail thread tx: %w", err)
 	}
 
 	return eventsCreated, eventsUpdated, personsCreated, maxHistory, nil
@@ -1025,6 +1000,33 @@ func (g *GmailAdapter) syncMessage(ctx context.Context, cortexDB *sql.DB, messag
 	eventsUpdated := 0
 	personsCreated := 0
 
+	tx, err := cortexDB.Begin()
+	if err != nil {
+		return eventsCreated, eventsUpdated, personsCreated, fmt.Errorf("begin gmail message tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	created, updated, participantsCreated, err := g.syncMessageWithDB(tx, message, cache)
+	if err != nil {
+		return eventsCreated, eventsUpdated, personsCreated, err
+	}
+	if err := tx.Commit(); err != nil {
+		return eventsCreated, eventsUpdated, personsCreated, fmt.Errorf("commit gmail message tx: %w", err)
+	}
+
+	if created {
+		eventsCreated++
+	} else if updated {
+		eventsUpdated++
+	}
+	personsCreated += participantsCreated
+
+	return eventsCreated, eventsUpdated, personsCreated, nil
+}
+
+func (g *GmailAdapter) syncMessageWithDB(cortexDB contacts.DBTX, message GmailMessage, cache *emailContactCache) (bool, bool, int, error) {
+	participantsCreated := 0
+
 	// Parse message timestamp (internalDate is Unix timestamp in milliseconds)
 	var timestamp int64
 	if _, err := fmt.Sscanf(message.InternalDate, "%d", &timestamp); err == nil {
@@ -1052,11 +1054,10 @@ func (g *GmailAdapter) syncMessage(ctx context.Context, cortexDB *sql.DB, messag
 	}
 
 	// Build content types
-	contentTypes := []string{"text"}
+	contentTypesJSON := contentTypesTextJSON
 	if g.hasAttachments(message.Payload) {
-		contentTypes = append(contentTypes, "attachment")
+		contentTypesJSON = contentTypesTextAttachmentJSON
 	}
-	contentTypesJSON, _ := json.Marshal(contentTypes)
 
 	// Determine direction based on SENT label
 	direction := "received"
@@ -1073,30 +1074,24 @@ func (g *GmailAdapter) syncMessage(ctx context.Context, cortexDB *sql.DB, messag
 	}
 
 	eventID := fmt.Sprintf("%s:%s", g.Name(), message.ID)
-	created, updated, err := g.upsertEvent(cortexDB, eventID, timestamp, string(contentTypesJSON), content, direction, threadID, message.ID)
+	created, updated, err := g.upsertEvent(cortexDB, eventID, timestamp, contentTypesJSON, content, direction, threadID, message.ID)
 	if err != nil {
-		return eventsCreated, eventsUpdated, personsCreated, err
-	}
-	if created {
-		eventsCreated++
-	} else if updated {
-		eventsUpdated++
+		return false, false, participantsCreated, err
 	}
 
-	participantsCreated, err := g.syncParticipants(cortexDB, eventID, from, to, cc, direction, cache)
+	participantsCreated, err = g.syncParticipants(cortexDB, eventID, from, to, cc, direction, cache)
 	if err != nil {
-		return eventsCreated, eventsUpdated, personsCreated, fmt.Errorf("failed to sync participants: %w", err)
+		return false, false, participantsCreated, fmt.Errorf("failed to sync participants: %w", err)
 	}
-	personsCreated += participantsCreated
 
 	if err := g.syncGmailStateAndTags(cortexDB, eventID, message.LabelIDs, direction); err != nil {
-		return eventsCreated, eventsUpdated, personsCreated, err
+		return false, false, participantsCreated, err
 	}
 
-	return eventsCreated, eventsUpdated, personsCreated, nil
+	return created, updated, participantsCreated, nil
 }
 
-func (g *GmailAdapter) upsertEvent(cortexDB *sql.DB, eventID string, timestamp int64, contentTypesJSON string, content string, direction string, threadID string, sourceID string) (created bool, updated bool, err error) {
+func (g *GmailAdapter) upsertEvent(cortexDB contacts.DBTX, eventID string, timestamp int64, contentTypesJSON string, content string, direction string, threadID string, sourceID string) (created bool, updated bool, err error) {
 	// Try insert first.
 	res, err := cortexDB.Exec(`
 		INSERT OR IGNORE INTO events (
@@ -1185,7 +1180,7 @@ func (g *GmailAdapter) hasAttachments(payload GmailPayload) bool {
 }
 
 // syncParticipants creates contacts (and persons when names exist) for email participants.
-func (g *GmailAdapter) syncParticipants(cortexDB *sql.DB, eventID, from, to, cc, direction string, cache *emailContactCache) (int, error) {
+func (g *GmailAdapter) syncParticipants(cortexDB contacts.DBTX, eventID, from, to, cc, direction string, cache *emailContactCache) (int, error) {
 	personsCreated := 0
 
 	// Parse and add sender
@@ -1271,7 +1266,7 @@ func (g *GmailAdapter) syncParticipants(cortexDB *sql.DB, eventID, from, to, cc,
 }
 
 // getOrCreateContactByEmail finds or creates a contact by email address.
-func (g *GmailAdapter) getOrCreateContactByEmail(cortexDB *sql.DB, email, displayName string, cache *emailContactCache) (string, bool, error) {
+func (g *GmailAdapter) getOrCreateContactByEmail(cortexDB contacts.DBTX, email, displayName string, cache *emailContactCache) (string, bool, error) {
 	normalized := contacts.NormalizeIdentifier(email, "email")
 	if normalized == "" {
 		return "", false, fmt.Errorf("empty email address")

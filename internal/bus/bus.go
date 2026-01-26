@@ -19,7 +19,11 @@ type Event struct {
 	Payload    *string `json:"payload_json,omitempty"`
 }
 
-func ensureTable(db *sql.DB) error {
+type ExecDB interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func ensureTable(db ExecDB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS bus_events (
 			seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +41,7 @@ func ensureTable(db *sql.DB) error {
 	return nil
 }
 
-func Emit(db *sql.DB, typ string, adapter string, cortexEventID string, payload any) error {
+func Emit(db ExecDB, typ string, adapter string, cortexEventID string, payload any) error {
 	if typ == "" {
 		return fmt.Errorf("type is required")
 	}
