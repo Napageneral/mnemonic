@@ -37,8 +37,8 @@ Validation after reimport:
 ## Repo state
 
 ### Cortex
-- Many uncommitted changes exist from earlier work (fixtures, verify-memory-live, etc).
-- Needs scoping before any additional commits.
+- Live evaluation is the primary test path.
+- Fixture-based harnesses are deprecated and removed.
 
 ### Eve
 - Repo was re-cloned from GitHub (old .git pointer was broken).

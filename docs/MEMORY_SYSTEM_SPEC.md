@@ -1561,122 +1561,82 @@ This section defines end-to-end tests that prove each feature in this spec works
 
 ---
 
-## Part 11: Verification Harness (Real Data Fixtures)
+## Part 11: Live Evaluation Harness (Primary)
 
-This section defines the **verification harness** that runs the test suite using real data fixtures
-from your sources (aix, gog, imessage). The goal is to validate system behavior on realistic data
-and make it easy to "vibe check" results with your own messages.
+This section defines the **live evaluation harness** that runs against real data in `cortex.db`.
+Fixture-based harnesses are deprecated and removed from the workflow.
 
-### 11.1 Harness Structure
+### 11.1 Goals
 
-**Directory layout (proposed):**
-
-```
-fixtures/
-  manifest.yaml
-  aix/
-    <fixture_id>/
-      episode.json
-      expectations.yaml
-  gog/
-    <fixture_id>/
-      episode.json
-      expectations.yaml
-  imessage/
-    <fixture_id>/
-      episode.json
-      expectations.yaml
-reports/
-  latest/
-    summary.md
-    failures.md
-    graph_diff.json
-```
-
-**episode.json (input):**
-```json
-{
-  "fixture_id": "imessage-01-job-change",
-  "source": "imessage",
-  "channel": "messages",
-  "participants": ["Tyler", "Casey"],
-  "reference_time": "2026-01-21T10:05:00-06:00",
-  "episode_content": "Tyler: I left Intent Systems in December and joined Anthropic."
-}
-```
-
-**expectations.yaml (assertions):**
-```yaml
-entities:
-  must_have:
-    - {name: "Tyler", type: "Person"}
-    - {name: "Anthropic", type: "Company"}
-  must_not_have:
-    - {name: "Claude", type: "Person"}
-relationships:
-  must_have:
-    - {source: "Tyler", type: "WORKS_AT", target: "Anthropic", valid_at: "2026-01"}
-    - {source: "Tyler", type: "WORKS_AT", target: "Intent Systems", invalid_at: "2025-12"}
-aliases:
-  must_have: []
-mentions:
-  require_asserted_by: true
-```
-
-**Matching rules:**
-- `must_have` = required outputs
-- `must_not_have` = forbidden outputs
-- `optional` = allowed but not required (tolerate LLM variance)
-- Relationship matching uses (source name, relation_type, target literal/entity)
+- Evaluate extraction on real conversations across channels with overlap.
+- Surface merge candidates, literal misses, and subject parsing issues.
+- Keep runs auditable and cleanup-safe via run IDs.
 
 ### 11.2 Harness Execution Flow
 
-1. Load fixture episodes from `fixtures/*/*/episode.json`
-2. Run full pipeline: extract → resolve → promote → dedupe → persist
-3. Compare outputs against `expectations.yaml`
-4. Generate reports: pass/fail + diffable summaries
-5. Re-run all fixtures to verify idempotency
+1. Select threads (imessage, gmail, cursor) with overlap.
+2. Run `cmd/verify-memory-live` against `cortex.db`.
+3. Review extracted entities/relationships in memory tables.
+4. Cleanup all eval data by run ID after review.
 
-### 11.3 Real Data Fixture Selection (What to Capture)
+### 11.3 Live Execution
 
-The fixtures should cover **variation** in:
-- Source (aix, gog, imessage)
-- Channel type (DM, group, email)
-- Identity markers (email/phone/handle)
-- Temporal information (absolute + relative dates)
-- Contradictions (job changes, moving locations)
-- Merge ambiguity (same name, shared identifiers)
+Example:
+```bash
+go run ./cmd/verify-memory-live \
+  -threads "imessage:+17072268448,imessage:+16508238440,imessage:chat773521807676249821,<gmail-thread>,<cursor-session>" \
+  -episodes-per-thread 10 \
+  -events-per-episode 10 \
+  -min-episode-events 5 \
+  -imessage-gap-minutes 90 \
+  -run-id live-eval-YYYYMMDD-HHMMSS \
+  -verbose
+```
 
-#### AIX Fixtures (structured/internal notes)
+### 11.4 Cleanup
 
-Focus on **personal facts** and **project updates**:
-- Job change + start date (temporal literals)
-- Location mention (city or address)
-- Project updates with ownership (WORKING_ON / BUILDING)
-- Event planning (SCHEDULED_FOR)
+```bash
+go run ./cmd/cleanup-live-eval --run-id live-eval-YYYYMMDD-HHMMSS --db /Users/tyler/Library/Application Support/Cortex/cortex.db
+```
 
-**Example cases:**
-- "I started Nexus in January"
-- "Meeting with Casey next Tuesday"
-- "Moved to Austin last year"
+Dry run (counts only):
+```bash
+go run ./cmd/cleanup-live-eval --run-id live-eval-YYYYMMDD-HHMMSS --dry-run
+```
 
-#### GOG Fixtures (email/contact data)
+### 11.5 Thread Selection (queries)
 
-Focus on **identity extraction** and **signature parsing**:
-- Email signature with phone + handle
-- Role/company change mentioned in email
-- Attending/hosting an event (calendar invite)
-- Thread where multiple people share same first name
+Find top threads for a contact name:
+```sql
+SELECT e.thread_id, e.channel, COUNT(*) AS cnt
+FROM events e
+JOIN event_participants ep ON e.id = ep.event_id
+JOIN contacts c ON ep.contact_id = c.id
+WHERE c.display_name LIKE '%Mom%'
+GROUP BY e.thread_id, e.channel
+ORDER BY cnt DESC
+LIMIT 10;
+```
 
-**Example cases:**
-- Signature: "— Casey Adams | c.adams@example.com | +1‑555‑123‑4567"
-- "I left Intent Systems and joined Anthropic"
+Top Gmail threads:
+```sql
+SELECT thread_id, COUNT(*) AS cnt
+FROM events
+WHERE channel = 'gmail'
+GROUP BY thread_id
+ORDER BY cnt DESC
+LIMIT 10;
+```
 
-#### iMessage Fixtures (chat data)
-
-Focus on **relationship and social context**:
-- Group chat with multiple participants
-- Nicknames and aliases ("Mom", "Dad")
+Top Cursor (AIX) threads:
+```sql
+SELECT thread_id, COUNT(*) AS cnt
+FROM events
+WHERE channel = 'cursor'
+GROUP BY thread_id
+ORDER BY cnt DESC
+LIMIT 10;
+```
 - Shared identifier (family phone)
 - Scheduling + rescheduling with relative dates
 - Contradiction detection (job/location change)

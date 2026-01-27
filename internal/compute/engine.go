@@ -1023,6 +1023,23 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 			e.timestamp,
 			COALESCE(p.canonical_name, c.display_name),
 			e.direction,
+			e.content_types,
+			e.metadata_json,
+			e.reply_to,
+			(
+				SELECT GROUP_CONCAT(
+					COALESCE(mp.canonical_name, mp.display_name, mc.display_name, 'Unknown'), '|'
+				)
+				FROM event_participants mem
+				LEFT JOIN contacts mc ON mem.contact_id = mc.id
+				LEFT JOIN persons mp ON mp.id = (
+					SELECT person_id FROM person_contact_links pcl
+					WHERE pcl.contact_id = mem.contact_id
+					ORDER BY confidence DESC, last_seen_at DESC
+					LIMIT 1
+				)
+				WHERE mem.event_id = e.id AND mem.role = 'member'
+			) as members,
 			(
 				SELECT GROUP_CONCAT(
 					CASE
@@ -1030,7 +1047,7 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 						WHEN a.media_type = 'video' THEN 'video'
 						WHEN a.media_type = 'audio' THEN 'audio'
 						WHEN a.media_type = 'sticker' THEN 'sticker'
-						ELSE COALESCE(a.filename, 'file')
+						ELSE COALESCE(a.filename, 'file') || '::' || COALESCE(a.mime_type, '')
 					END, '|'
 				)
 				FROM attachments a WHERE a.event_id = e.id
@@ -1054,21 +1071,56 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 	defer rows.Close()
 
 	var sb strings.Builder
+	messageSnippets := map[string]string{}
 	for rows.Next() {
 		var eventID string
 		var content sql.NullString
 		var timestamp int64
 		var senderName sql.NullString
 		var direction string
+		var contentTypes string
+		var metadataJSON sql.NullString
+		var replyTo sql.NullString
+		var members sql.NullString
 		var attachments sql.NullString
 
-		if err := rows.Scan(&eventID, &content, &timestamp, &senderName, &direction, &attachments); err != nil {
+		if err := rows.Scan(&eventID, &content, &timestamp, &senderName, &direction, &contentTypes, &metadataJSON, &replyTo, &members, &attachments); err != nil {
 			return "", err
 		}
 
 		name := "Unknown"
 		if senderName.Valid && senderName.String != "" {
 			name = senderName.String
+		}
+
+		isReaction := hasContentType(contentTypes, "reaction")
+		if isReaction {
+			emoji := strings.TrimSpace(content.String)
+			if emoji == "" {
+				continue
+			}
+			snippet := ""
+			if replyTo.Valid && replyTo.String != "" {
+				if candidate, ok := messageSnippets[replyTo.String]; ok {
+					snippet = candidate
+				}
+			}
+			if snippet != "" {
+				sb.WriteString(fmt.Sprintf("  -> %s %s to \"%s\"\n", name, emoji, snippet))
+			} else {
+				sb.WriteString(fmt.Sprintf("  -> %s reacted %s\n", name, emoji))
+			}
+			continue
+		}
+
+		isMembership := hasContentType(contentTypes, "membership")
+		if isMembership {
+			line := formatMembershipLine(name, metadataJSON, members)
+			if line != "" {
+				sb.WriteString(line)
+				sb.WriteString("\n")
+			}
+			continue
 		}
 
 		// Build message parts
@@ -1092,7 +1144,12 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 				case "sticker":
 					parts = append(parts, "[Sticker]")
 				default:
-					parts = append(parts, fmt.Sprintf("[Attachment: %s]", att))
+					fileName, mimeType := splitAttachmentDescriptor(att)
+					if mimeType != "" {
+						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", fileName, mimeType))
+					} else {
+						parts = append(parts, fmt.Sprintf("[Attachment] %s", fileName))
+					}
 				}
 			}
 		}
@@ -1100,6 +1157,11 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 		// Only write line if there's content
 		if len(parts) > 0 {
 			sb.WriteString(fmt.Sprintf("%s: %s\n", name, strings.Join(parts, " ")))
+		}
+
+		snippet := reactionSnippet(content.String)
+		if snippet != "" {
+			messageSnippets[eventID] = snippet
 		}
 	}
 
@@ -1114,6 +1176,8 @@ func (e *Engine) buildTurnQualityText(ctx context.Context, episodeID string) (st
 		JOIN events e ON ee.event_id = e.id
 		WHERE ee.episode_id = ?
 		  AND e.direction IN ('sent', 'received')
+		  AND e.content_types NOT LIKE '%"reaction"%'
+		  AND e.content_types NOT LIKE '%"membership"%'
 		ORDER BY ee.position
 	`, episodeID)
 	if err != nil {
@@ -1154,6 +1218,22 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 			ep.contact_id,
 			p.is_me,
 			e.direction,
+			e.content_types,
+			e.metadata_json,
+			e.reply_to,
+			(
+				SELECT GROUP_CONCAT(
+					COALESCE(mem.contact_id, '') || '::' || COALESCE(CAST(mp.is_me AS TEXT), ''), '|'
+				)
+				FROM event_participants mem
+				LEFT JOIN persons mp ON mp.id = (
+					SELECT person_id FROM person_contact_links pcl
+					WHERE pcl.contact_id = mem.contact_id
+					ORDER BY confidence DESC, last_seen_at DESC
+					LIMIT 1
+				)
+				WHERE mem.event_id = e.id AND mem.role = 'member'
+			) as members,
 			(
 				SELECT GROUP_CONCAT(
 					CASE
@@ -1161,7 +1241,7 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 						WHEN a.media_type = 'video' THEN 'video'
 						WHEN a.media_type = 'audio' THEN 'audio'
 						WHEN a.media_type = 'sticker' THEN 'sticker'
-						ELSE COALESCE(a.filename, 'file')
+						ELSE COALESCE(a.filename, 'file') || '::' || COALESCE(a.mime_type, '')
 					END, '|'
 				)
 				FROM attachments a WHERE a.event_id = e.id
@@ -1186,6 +1266,7 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 	var sb strings.Builder
 	labels := map[string]string{}
 	participantCount := 0
+	messageSnippets := map[string]string{}
 
 	for rows.Next() {
 		var eventID string
@@ -1194,24 +1275,64 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 		var senderID sql.NullString
 		var isMe sql.NullInt64
 		var direction string
+		var contentTypes string
+		var metadataJSON sql.NullString
+		var replyTo sql.NullString
+		var members sql.NullString
 		var attachments sql.NullString
 
-		if err := rows.Scan(&eventID, &content, &timestamp, &senderID, &isMe, &direction, &attachments); err != nil {
+		if err := rows.Scan(&eventID, &content, &timestamp, &senderID, &isMe, &direction, &contentTypes, &metadataJSON, &replyTo, &members, &attachments); err != nil {
 			return "", err
+		}
+
+		labelForContact := func(contactID string, isMeFlag bool) string {
+			if contactID == "" {
+				return "Unknown"
+			}
+			if isMeFlag {
+				labels[contactID] = "User"
+				return "User"
+			}
+			if label, ok := labels[contactID]; ok {
+				return label
+			}
+			participantCount++
+			label := fmt.Sprintf("Participant%d", participantCount)
+			labels[contactID] = label
+			return label
 		}
 
 		name := "Unknown"
 		if senderID.Valid && senderID.String != "" {
-			if isMe.Valid && isMe.Int64 == 1 {
-				name = "User"
-			} else if label, ok := labels[senderID.String]; ok {
-				name = label
-			} else {
-				participantCount++
-				label := fmt.Sprintf("Participant%d", participantCount)
-				labels[senderID.String] = label
-				name = label
+			name = labelForContact(senderID.String, isMe.Valid && isMe.Int64 == 1)
+		}
+
+		if hasContentType(contentTypes, "reaction") {
+			emoji := strings.TrimSpace(content.String)
+			if emoji == "" {
+				continue
 			}
+			snippet := ""
+			if replyTo.Valid && replyTo.String != "" {
+				if candidate, ok := messageSnippets[replyTo.String]; ok {
+					snippet = candidate
+				}
+			}
+			if snippet != "" {
+				sb.WriteString(fmt.Sprintf("  -> %s %s to \"%s\"\n", name, emoji, snippet))
+			} else {
+				sb.WriteString(fmt.Sprintf("  -> %s reacted %s\n", name, emoji))
+			}
+			continue
+		}
+
+		if hasContentType(contentTypes, "membership") {
+			line := formatMembershipLineMasked(name, labelForContact, metadataJSON, members)
+			if line != "" {
+				sb.WriteString(line)
+				sb.WriteString("\n")
+			}
+			continue
 		}
 
 		var parts []string
@@ -1230,7 +1351,12 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 				case "sticker":
 					parts = append(parts, "[Sticker]")
 				default:
-					parts = append(parts, fmt.Sprintf("[Attachment: %s]", att))
+					fileName, mimeType := splitAttachmentDescriptor(att)
+					if mimeType != "" {
+						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", fileName, mimeType))
+					} else {
+						parts = append(parts, fmt.Sprintf("[Attachment] %s", fileName))
+					}
 				}
 			}
 		}
@@ -1238,9 +1364,187 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 		if len(parts) > 0 {
 			sb.WriteString(fmt.Sprintf("%s: %s\n", name, strings.Join(parts, " ")))
 		}
+
+		snippet := reactionSnippet(content.String)
+		if snippet != "" {
+			messageSnippets[eventID] = snippet
+		}
 	}
 
 	return sb.String(), rows.Err()
+}
+
+func hasContentType(contentTypesJSON, target string) bool {
+	if contentTypesJSON == "" {
+		return false
+	}
+	var types []string
+	if err := json.Unmarshal([]byte(contentTypesJSON), &types); err == nil {
+		for _, t := range types {
+			if t == target {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.Contains(contentTypesJSON, target)
+}
+
+func formatMembershipLine(actor string, metadataJSON sql.NullString, members sql.NullString) string {
+	action := parseMembershipAction(metadataJSON)
+	memberNames := splitPipeList(members)
+
+	actor = strings.TrimSpace(actor)
+	if actor == "Unknown" {
+		actor = ""
+	}
+	memberList := strings.Join(memberNames, ", ")
+
+	switch action {
+	case "added":
+		if memberList == "" {
+			return "-> member joined"
+		}
+		if actor != "" {
+			return fmt.Sprintf("-> %s added %s", actor, memberList)
+		}
+		return fmt.Sprintf("-> %s joined", memberList)
+	case "removed":
+		if memberList == "" {
+			return "-> member left"
+		}
+		if actor != "" && actor != memberList {
+			return fmt.Sprintf("-> %s removed %s", actor, memberList)
+		}
+		return fmt.Sprintf("-> %s left", memberList)
+	default:
+		if memberList == "" {
+			return ""
+		}
+		return fmt.Sprintf("-> membership update: %s", memberList)
+	}
+}
+
+func formatMembershipLineMasked(actor string, labelFor func(contactID string, isMe bool) string, metadataJSON sql.NullString, members sql.NullString) string {
+	action := parseMembershipAction(metadataJSON)
+	memberNames := splitMemberDescriptorsMasked(members, labelFor)
+
+	actor = strings.TrimSpace(actor)
+	if actor == "Unknown" {
+		actor = ""
+	}
+	memberList := strings.Join(memberNames, ", ")
+
+	switch action {
+	case "added":
+		if memberList == "" {
+			return "-> member joined"
+		}
+		if actor != "" {
+			return fmt.Sprintf("-> %s added %s", actor, memberList)
+		}
+		return fmt.Sprintf("-> %s joined", memberList)
+	case "removed":
+		if memberList == "" {
+			return "-> member left"
+		}
+		if actor != "" && actor != memberList {
+			return fmt.Sprintf("-> %s removed %s", actor, memberList)
+		}
+		return fmt.Sprintf("-> %s left", memberList)
+	default:
+		if memberList == "" {
+			return ""
+		}
+		return fmt.Sprintf("-> membership update: %s", memberList)
+	}
+}
+
+func parseMembershipAction(metadataJSON sql.NullString) string {
+	if !metadataJSON.Valid || metadataJSON.String == "" {
+		return "unknown"
+	}
+	var payload struct {
+		Action string `json:"action"`
+	}
+	if err := json.Unmarshal([]byte(metadataJSON.String), &payload); err != nil {
+		return "unknown"
+	}
+	if payload.Action == "" {
+		return "unknown"
+	}
+	return payload.Action
+}
+
+func splitPipeList(values sql.NullString) []string {
+	if !values.Valid || values.String == "" {
+		return nil
+	}
+	raw := strings.Split(values.String, "|")
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if item != "" && item != "Unknown" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func splitAttachmentDescriptor(att string) (string, string) {
+	parts := strings.SplitN(att, "::", 2)
+	if len(parts) == 2 {
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+	return strings.TrimSpace(att), ""
+}
+
+func splitReactionDescriptor(reaction string) (string, string) {
+	parts := strings.SplitN(reaction, "::", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+}
+
+func splitReactionDescriptorMasked(reaction string) (string, bool, string) {
+	parts := strings.SplitN(reaction, "::", 3)
+	if len(parts) != 3 {
+		return "", false, ""
+	}
+	isMe := strings.TrimSpace(parts[1]) == "1"
+	return strings.TrimSpace(parts[0]), isMe, strings.TrimSpace(parts[2])
+}
+
+func splitMemberDescriptorsMasked(values sql.NullString, labelFor func(contactID string, isMe bool) string) []string {
+	if !values.Valid || values.String == "" {
+		return nil
+	}
+	raw := strings.Split(values.String, "|")
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		parts := strings.SplitN(item, "::", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		contactID := strings.TrimSpace(parts[0])
+		isMe := strings.TrimSpace(parts[1]) == "1"
+		out = append(out, labelFor(contactID, isMe))
+	}
+	return out
+}
+
+func reactionSnippet(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+	const maxRunes = 80
+	runes := []rune(trimmed)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "…"
+	}
+	return trimmed
 }
 
 // buildFacetText builds text representation of a facet for embedding

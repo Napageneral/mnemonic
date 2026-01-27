@@ -95,7 +95,7 @@ func (a *IMessageAdapter) Sync(ctx context.Context, cortexDB *sql.DB, full bool)
 	// Map Eve result to Comms result
 	result.PersonsCreated = syncResult.HandlesSynced
 	result.ThreadsCreated = syncResult.ChatsSynced
-	result.EventsCreated = syncResult.MessagesSynced
+	result.EventsCreated = syncResult.MessagesSynced + syncResult.MembershipSynced
 	result.ReactionsCreated = syncResult.ReactionsSynced
 	result.AttachmentsCreated = syncResult.AttachmentsSynced
 	result.Duration = time.Since(startTime)

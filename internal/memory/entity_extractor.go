@@ -64,6 +64,8 @@ func (e *EntityExtractor) Extract(ctx context.Context, input EntityExtractionInp
 	}
 
 	prompt := e.buildPrompt(input)
+	writeDebugFile(ctx, "episode.txt", input.EpisodeContent)
+	writeDebugFile(ctx, "entity_prompt.txt", prompt)
 
 	req := &gemini.GenerateContentRequest{
 		Contents: []gemini.Content{{
@@ -84,6 +86,7 @@ func (e *EntityExtractor) Extract(ctx context.Context, input EntityExtractionInp
 	if text == "" {
 		return nil, fmt.Errorf("empty response from LLM")
 	}
+	writeDebugFile(ctx, "entity_response.json", text)
 
 	var result EntityExtractionResult
 	if err := json.Unmarshal([]byte(text), &result); err != nil {

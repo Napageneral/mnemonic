@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/Napageneral/cortex/internal/gemini"
@@ -77,6 +78,7 @@ func (e *RelationshipExtractor) Extract(ctx context.Context, input RelationshipE
 	}
 
 	prompt := e.buildPrompt(input)
+	writeDebugFile(ctx, "relationship_prompt.txt", prompt)
 
 	req := &gemini.GenerateContentRequest{
 		Contents: []gemini.Content{{
@@ -93,14 +95,24 @@ func (e *RelationshipExtractor) Extract(ctx context.Context, input RelationshipE
 		return nil, fmt.Errorf("generate content: %w", err)
 	}
 
-	text := extractTextFromResponse(resp)
+	text := strings.TrimSpace(extractTextFromResponse(resp))
 	if text == "" {
 		return nil, fmt.Errorf("empty response from LLM")
 	}
+	writeDebugFile(ctx, "relationship_response.json", text)
 
 	var result RelationshipExtractionResult
 	if err := json.Unmarshal([]byte(text), &result); err != nil {
-		return nil, fmt.Errorf("parse response JSON: %w (response: %s)", err, text)
+		repaired := repairRelationshipJSON(text)
+		if repaired != text {
+			if err2 := json.Unmarshal([]byte(repaired), &result); err2 == nil {
+				text = repaired
+			} else {
+				return nil, fmt.Errorf("parse response JSON: %w (response: %s)", err, text)
+			}
+		} else {
+			return nil, fmt.Errorf("parse response JSON: %w (response: %s)", err, text)
+		}
 	}
 
 	// Validate extracted relationships
@@ -404,6 +416,20 @@ func (e *RelationshipExtractor) buildResolvedEntitiesJSON(entities []ResolvedEnt
 	}
 	data, _ := json.MarshalIndent(promptEntities, "", "  ")
 	return string(data)
+}
+
+func repairRelationshipJSON(text string) string {
+	clean := strings.TrimSpace(text)
+	clean = strings.TrimPrefix(clean, "```json")
+	clean = strings.TrimPrefix(clean, "```")
+	clean = strings.TrimSuffix(clean, "```")
+
+	reSource := regexp.MustCompile(`("source_entity_id"\s*:\s*)0+([0-9]+)`)
+	reTarget := regexp.MustCompile(`("target_entity_id"\s*:\s*)0+([0-9]+)`)
+	clean = reSource.ReplaceAllString(clean, "$1$2")
+	clean = reTarget.ReplaceAllString(clean, "$1$2")
+
+	return clean
 }
 
 // MapRelationshipsToUUIDs converts temporary entity IDs in relationships to UUIDs.
