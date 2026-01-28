@@ -57,6 +57,26 @@ func SyncAll(ctx context.Context, db *sql.DB, cfg *config.Config, full bool) Syn
 		return result
 	}
 
+	ftsDisabled := false
+	if full {
+		if err := disableFTS(db); err != nil {
+			result.OK = false
+			result.Message = fmt.Sprintf("Failed to disable FTS triggers: %v", err)
+			return result
+		}
+		ftsDisabled = true
+	}
+	if ftsDisabled {
+		defer func() {
+			if err := rebuildFTS(db); err != nil {
+				result.OK = false
+				if result.Message == "" {
+					result.Message = fmt.Sprintf("Failed to rebuild FTS index: %v", err)
+				}
+			}
+		}()
+	}
+
 	// Sync each enabled adapter
 	for name, adapterCfg := range cfg.Adapters {
 		if !adapterCfg.Enabled {
@@ -92,6 +112,26 @@ func SyncOne(ctx context.Context, db *sql.DB, cfg *config.Config, adapterName st
 		return result
 	}
 
+	ftsDisabled := false
+	if full {
+		if err := disableFTS(db); err != nil {
+			result.OK = false
+			result.Message = fmt.Sprintf("Failed to disable FTS triggers: %v", err)
+			return result
+		}
+		ftsDisabled = true
+	}
+	if ftsDisabled {
+		defer func() {
+			if err := rebuildFTS(db); err != nil {
+				result.OK = false
+				if result.Message == "" {
+					result.Message = fmt.Sprintf("Failed to rebuild FTS index: %v", err)
+				}
+			}
+		}()
+	}
+
 	adapterResult := syncAdapter(ctx, db, adapterName, adapterCfg, full)
 	result.Adapters = []AdapterResult{adapterResult}
 
@@ -100,6 +140,44 @@ func SyncOne(ctx context.Context, db *sql.DB, cfg *config.Config, adapterName st
 	}
 
 	return result
+}
+
+func disableFTS(db *sql.DB) error {
+	if _, err := db.Exec("PRAGMA trusted_schema = ON"); err != nil {
+		return err
+	}
+	statements := []string{
+		"DROP TRIGGER IF EXISTS events_fts_insert",
+		"DROP TRIGGER IF EXISTS events_fts_update",
+		"DROP TRIGGER IF EXISTS events_fts_delete",
+		"DROP TABLE IF EXISTS events_fts",
+	}
+	for _, stmt := range statements {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rebuildFTS(db *sql.DB) error {
+	if _, err := db.Exec("PRAGMA trusted_schema = ON"); err != nil {
+		return err
+	}
+	statements := []string{
+		"CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(event_id UNINDEXED, channel UNINDEXED, content, tokenize='porter unicode61')",
+		"CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events BEGIN INSERT INTO events_fts(event_id, channel, content) VALUES (new.id, new.channel, COALESCE(new.content, '')); END",
+		"CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE ON events BEGIN DELETE FROM events_fts WHERE event_id = old.id; INSERT INTO events_fts(event_id, channel, content) VALUES (new.id, new.channel, COALESCE(new.content, '')); END",
+		"CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events BEGIN DELETE FROM events_fts WHERE event_id = old.id; END",
+		"DELETE FROM events_fts",
+		"INSERT INTO events_fts(event_id, channel, content) SELECT id, channel, COALESCE(content, '') FROM events",
+	}
+	for _, stmt := range statements {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // syncAdapter syncs a single adapter and returns its result

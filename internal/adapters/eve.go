@@ -104,8 +104,8 @@ func (e *EveAdapter) Sync(ctx context.Context, cortexDB *sql.DB, full bool) (Syn
 	if full {
 		_, _ = cortexDB.Exec("PRAGMA synchronous = OFF")
 		_, _ = cortexDB.Exec("PRAGMA temp_store = MEMORY")
-		_, _ = cortexDB.Exec("PRAGMA cache_size = -200000")        // ~200MB
-		_, _ = cortexDB.Exec("PRAGMA mmap_size = 268435456")       // 256MB
+		_, _ = cortexDB.Exec("PRAGMA cache_size = -200000")         // ~200MB
+		_, _ = cortexDB.Exec("PRAGMA mmap_size = 268435456")        // 256MB
 		_, _ = cortexDB.Exec("PRAGMA wal_autocheckpoint = 1000000") // reduce checkpoints
 	}
 	// Keep correctness while reducing per-statement overhead.
@@ -186,6 +186,19 @@ func (e *EveAdapter) Sync(ctx context.Context, cortexDB *sql.DB, full bool) (Syn
 		result.Perf["reactions."+k] = v
 	}
 	result.Perf["reactions.total"] = time.Since(reactionsStart).String()
+
+	// Sync membership events
+	membershipStart := time.Now()
+	membershipCreated, membershipUpdated, perfMembership, err := e.syncMembershipEvents(ctx, eveDB, cortexDB, lastSyncTimestamp, contactMap, meContactID)
+	if err != nil {
+		return result, fmt.Errorf("failed to sync membership events: %w", err)
+	}
+	result.EventsCreated += membershipCreated
+	result.EventsUpdated += membershipUpdated
+	for k, v := range perfMembership {
+		result.Perf["membership."+k] = v
+	}
+	result.Perf["membership.total"] = time.Since(membershipStart).String()
 
 	// Update sync watermark
 	// IMPORTANT: use the max imported event timestamp, NOT wall-clock time.
@@ -1053,6 +1066,180 @@ func (e *EveAdapter) syncReactions(ctx context.Context, eveDB, cortexDB *sql.DB,
 	return created, updated, perf, nil
 }
 
+// syncMembershipEvents syncs Eve membership events to cortex events
+func (e *EveAdapter) syncMembershipEvents(ctx context.Context, eveDB, cortexDB *sql.DB, lastSyncTimestamp int64, contactMap map[int64]string, meContactID string) (created int, updated int, perf map[string]string, err error) {
+	_ = ctx
+	perf = map[string]string{}
+
+	adapterPrefix := e.Name() + ":"
+	const contentTypesMembership = "[\"membership\"]"
+
+	query := `
+		SELECT
+			me.id,
+			me.guid,
+			me.actor_id,
+			me.member_id,
+			me.action_type,
+			me.item_type,
+			me.message_action_type,
+			me.group_title,
+			me.is_from_me,
+			CAST(strftime('%s', me.timestamp) AS INTEGER) as timestamp_unix,
+			'imessage:' || COALESCE(c.chat_identifier, printf('chat_id:%d', me.chat_id)) as thread_id
+		FROM membership_events me
+		LEFT JOIN chats c ON me.chat_id = c.id
+		WHERE CAST(strftime('%s', me.timestamp) AS INTEGER) > ?
+		ORDER BY timestamp_unix ASC
+	`
+
+	qStart := time.Now()
+	rows, err := eveDB.Query(query, lastSyncTimestamp)
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("failed to query Eve membership events: %w", err)
+	}
+	defer rows.Close()
+	perf["query"] = time.Since(qStart).String()
+
+	txStart := time.Now()
+	tx, err := cortexDB.Begin()
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("begin cortex tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmtInsertEvent, err := tx.Prepare(`
+		INSERT INTO events (
+			id, timestamp, channel, content_types, content,
+			direction, thread_id, reply_to, source_adapter, source_id, metadata_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_adapter, source_id) DO UPDATE SET
+			channel = excluded.channel,
+			content_types = excluded.content_types,
+			content = excluded.content,
+			direction = excluded.direction,
+			thread_id = excluded.thread_id,
+			reply_to = excluded.reply_to,
+			metadata_json = excluded.metadata_json,
+			timestamp = excluded.timestamp
+	`)
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("prepare insert membership event: %w", err)
+	}
+	defer stmtInsertEvent.Close()
+
+	stmtInsertParticipant, err := tx.Prepare(`
+		INSERT OR IGNORE INTO event_participants (event_id, contact_id, role)
+		VALUES (?, ?, ?)
+	`)
+	if err != nil {
+		return 0, 0, perf, fmt.Errorf("prepare insert participant: %w", err)
+	}
+	defer stmtInsertParticipant.Close()
+
+	for rows.Next() {
+		var membershipID int64
+		var guid, threadID string
+		var actorID, memberID, actionType sql.NullInt64
+		var itemType, messageActionType sql.NullInt64
+		var groupTitle sql.NullString
+		var isFromMe bool
+		var timestamp int64
+
+		if err := rows.Scan(
+			&membershipID,
+			&guid,
+			&actorID,
+			&memberID,
+			&actionType,
+			&itemType,
+			&messageActionType,
+			&groupTitle,
+			&isFromMe,
+			&timestamp,
+			&threadID,
+		); err != nil {
+			return created, updated, perf, fmt.Errorf("failed to scan membership row: %w", err)
+		}
+
+		action := mapGroupActionType(actionType.Int64)
+		content := action
+
+		direction := "received"
+		if isFromMe {
+			direction = "sent"
+		}
+
+		eventID := adapterPrefix + guid
+
+		metadata := map[string]any{
+			"action":            action,
+			"group_action_type": actionType.Int64,
+		}
+		if itemType.Valid {
+			metadata["item_type"] = itemType.Int64
+		}
+		if messageActionType.Valid {
+			metadata["message_action_type"] = messageActionType.Int64
+		}
+		if groupTitle.Valid && groupTitle.String != "" {
+			metadata["group_title"] = groupTitle.String
+		}
+		if memberID.Valid {
+			metadata["other_handle_id"] = memberID.Int64
+			if contactID, ok := contactMap[memberID.Int64]; ok && contactID != "" {
+				metadata["other_contact_id"] = contactID
+				_, _ = stmtInsertParticipant.Exec(eventID, contactID, "member")
+			}
+		}
+
+		metadataJSON, err := json.Marshal(metadata)
+		if err != nil {
+			return created, updated, perf, fmt.Errorf("marshal membership metadata: %w", err)
+		}
+
+		res, err := stmtInsertEvent.Exec(
+			eventID,
+			timestamp,
+			"imessage",
+			contentTypesMembership,
+			content,
+			direction,
+			threadID,
+			"",
+			e.Name(),
+			guid,
+			string(metadataJSON),
+		)
+		if err != nil {
+			return created, updated, perf, fmt.Errorf("insert membership event: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			created++
+		} else if n == 0 {
+			updated++
+		}
+
+		if actorID.Valid {
+			if contactID, ok := contactMap[actorID.Int64]; ok && contactID != "" {
+				_, _ = stmtInsertParticipant.Exec(eventID, contactID, "sender")
+			}
+		}
+		if isFromMe && meContactID != "" {
+			_, _ = stmtInsertParticipant.Exec(eventID, meContactID, "sender")
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return created, updated, perf, err
+	}
+	if err := tx.Commit(); err != nil {
+		return created, updated, perf, fmt.Errorf("commit cortex tx: %w", err)
+	}
+	perf["tx_commit"] = time.Since(txStart).String()
+	return created, updated, perf, nil
+}
+
 // mapReactionType converts iMessage reaction_type integer to emoji
 func mapReactionType(reactionType int64) string {
 	switch reactionType {
@@ -1070,6 +1257,17 @@ func mapReactionType(reactionType int64) string {
 		return "❓" // question
 	default:
 		return fmt.Sprintf("reaction:%d", reactionType) // fallback for unknown types
+	}
+}
+
+func mapGroupActionType(actionType int64) string {
+	switch actionType {
+	case 1:
+		return "added"
+	case 3:
+		return "removed"
+	default:
+		return "unknown"
 	}
 }
 
