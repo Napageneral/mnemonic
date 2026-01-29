@@ -192,18 +192,49 @@ func fetchEvents(db *sql.DB, threadID string, centerTS int64, limit int, include
 			e.content_types,
 			e.metadata_json,
 			e.reply_to,
-			COALESCE(p.canonical_name, p.display_name, c.display_name,
+			COALESCE(
+				p.canonical_name, 
+				p.display_name, 
+				-- Try to find person by matching phone number
+				(SELECT p2.canonical_name FROM persons p2
+				 JOIN person_contact_links pcl2 ON p2.id = pcl2.person_id
+				 JOIN contacts c2 ON pcl2.contact_id = c2.id
+				 JOIN contact_identifiers ci2 ON c2.id = ci2.contact_id
+				 WHERE ci2.type = 'phone' AND ci2.normalized = (
+					SELECT ci3.normalized FROM contact_identifiers ci3 
+					WHERE ci3.contact_id = c.id AND ci3.type = 'phone' LIMIT 1
+				 ) LIMIT 1),
+				-- Fallback to contact display name if it's not just a phone number
+				CASE WHEN c.display_name IS NOT NULL AND c.display_name != '' 
+				     AND c.display_name NOT GLOB '[0-9]*' THEN c.display_name ELSE NULL END,
+				-- Fallback to phone/email identifier
 				(SELECT ci.value FROM contact_identifiers ci 
 				 WHERE ci.contact_id = c.id AND ci.type IN ('phone', 'email')
 				 ORDER BY CASE ci.type WHEN 'phone' THEN 1 ELSE 2 END LIMIT 1),
-				CASE e.direction WHEN 'sent' THEN 'Me' ELSE 'Unknown' END) as sender,
+				CASE e.direction WHEN 'sent' THEN 'Me' ELSE 'Unknown' END
+			) as sender,
 			(
 				SELECT GROUP_CONCAT(
-					COALESCE(mp.canonical_name, mp.display_name, mc.display_name,
+					COALESCE(
+						mp.canonical_name, 
+						mp.display_name, 
+						-- Try to find person by matching phone number
+						(SELECT p2.canonical_name FROM persons p2
+						 JOIN person_contact_links pcl2 ON p2.id = pcl2.person_id
+						 JOIN contacts c2 ON pcl2.contact_id = c2.id
+						 JOIN contact_identifiers ci2 ON c2.id = ci2.contact_id
+						 WHERE ci2.type = 'phone' AND ci2.normalized = (
+							SELECT mci2.normalized FROM contact_identifiers mci2 
+							WHERE mci2.contact_id = mc.id AND mci2.type = 'phone' LIMIT 1
+						 ) LIMIT 1),
+						-- Fallback to contact display name if not just a phone number
+						CASE WHEN mc.display_name IS NOT NULL AND mc.display_name != '' 
+						     AND mc.display_name NOT GLOB '[0-9]*' THEN mc.display_name ELSE NULL END,
 						(SELECT mci.value FROM contact_identifiers mci 
 						 WHERE mci.contact_id = mc.id AND mci.type IN ('phone', 'email')
 						 ORDER BY CASE mci.type WHEN 'phone' THEN 1 ELSE 2 END LIMIT 1),
-						'Unknown'), '|'
+						'Unknown'
+					), '|'
 				)
 				FROM event_participants mem
 				LEFT JOIN contacts mc ON mem.contact_id = mc.id
@@ -286,9 +317,9 @@ func encodeEvents(db *sql.DB, events []eventRow) string {
 				}
 			}
 			if snippet != "" {
-				sb.WriteString(fmt.Sprintf("  -> %s %s to \"%s\"\n", ev.Sender, emoji, snippet))
+				sb.WriteString(fmt.Sprintf("[%s] -> %s %s to \"%s\"\n", timestamp, ev.Sender, emoji, snippet))
 			} else {
-				sb.WriteString(fmt.Sprintf("  -> %s reacted %s\n", ev.Sender, emoji))
+				sb.WriteString(fmt.Sprintf("[%s] -> %s reacted %s\n", timestamp, ev.Sender, emoji))
 			}
 			continue
 		}
@@ -296,8 +327,7 @@ func encodeEvents(db *sql.DB, events []eventRow) string {
 		if hasContentType(ev.ContentTypes, "membership") {
 			line := formatMembershipLine(db, ev.Sender, ev.MetadataJSON, ev.Members)
 			if line != "" {
-				sb.WriteString(line)
-				sb.WriteString("\n")
+				sb.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, line))
 			}
 			continue
 		}
@@ -631,13 +661,28 @@ func lookupMemberFromMetadata(db *sql.DB, metadataJSON string) string {
 		return ""
 	}
 	
-	// Look up contact name
+	// Look up contact name with phone number matching fallback
 	var name sql.NullString
 	err := db.QueryRow(`
-		SELECT COALESCE(p.canonical_name, p.display_name, c.display_name,
+		SELECT COALESCE(
+			p.canonical_name, 
+			p.display_name,
+			-- Try to find person by matching phone number
+			(SELECT p2.canonical_name FROM persons p2
+			 JOIN person_contact_links pcl2 ON p2.id = pcl2.person_id
+			 JOIN contacts c2 ON pcl2.contact_id = c2.id
+			 JOIN contact_identifiers ci2 ON c2.id = ci2.contact_id
+			 WHERE ci2.type = 'phone' AND ci2.normalized = (
+				SELECT ci3.normalized FROM contact_identifiers ci3 
+				WHERE ci3.contact_id = c.id AND ci3.type = 'phone' LIMIT 1
+			 ) LIMIT 1),
+			-- Fallback to contact display name if not just a phone number
+			CASE WHEN c.display_name IS NOT NULL AND c.display_name != '' 
+			     AND c.display_name NOT GLOB '[0-9]*' THEN c.display_name ELSE NULL END,
 			(SELECT ci.value FROM contact_identifiers ci 
 			 WHERE ci.contact_id = c.id AND ci.type IN ('phone', 'email')
-			 ORDER BY CASE ci.type WHEN 'phone' THEN 1 ELSE 2 END LIMIT 1))
+			 ORDER BY CASE ci.type WHEN 'phone' THEN 1 ELSE 2 END LIMIT 1)
+		)
 		FROM contacts c
 		LEFT JOIN persons p ON p.id = (
 			SELECT person_id FROM person_contact_links pcl
