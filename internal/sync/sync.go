@@ -203,14 +203,6 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 			return result
 		}
 
-	case "imessage":
-		// Direct iMessage adapter (reads chat.db directly via Eve library).
-		adapter, err = adapters.NewIMessageAdapter()
-		if err != nil {
-			result.Error = fmt.Sprintf("Failed to create adapter: %v", err)
-			return result
-		}
-
 	case "gogcli":
 		// Gmail adapter via gogcli
 		accountVal, ok := cfg.Options["account"]

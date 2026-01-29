@@ -1719,117 +1719,6 @@ mnemonic sync --background
 	watchGmailCmd.Flags().String("adapter", "", "Only trigger sync for this adapter (default: all gogcli adapters)")
 	watchGmailCmd.Flags().Int("debounce-seconds", 10, "Minimum seconds between sync triggers per adapter")
 
-	// watch imessage: watch chat.db for changes and trigger incremental sync
-	watchIMessageCmd := &cobra.Command{
-		Use:   "imessage",
-		Short: "Watch chat.db for new messages and sync incrementally",
-		Run: func(cmd *cobra.Command, args []string) {
-			debounceSec, _ := cmd.Flags().GetInt("debounce-seconds")
-
-			database, err := db.Open()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				os.Exit(1)
-			}
-			defer database.Close()
-
-			adapter, err := adapters.NewIMessageAdapter()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to create iMessage adapter: %v\n", err)
-				os.Exit(1)
-			}
-
-			// Get chat.db path
-			chatDBPath := os.ExpandEnv("$HOME/Library/Messages/chat.db")
-			if override := os.Getenv("EVE_SOURCE_CHAT_DB"); override != "" {
-				chatDBPath = os.ExpandEnv(override)
-			}
-			chatDBDir := filepath.Dir(chatDBPath)
-
-			// Create file watcher
-			watcher, err := fsnotify.NewWatcher()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to create watcher: %v\n", err)
-				os.Exit(1)
-			}
-			defer watcher.Close()
-
-			// Watch the Messages directory (catches chat.db and WAL changes)
-			if err := watcher.Add(chatDBDir); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to watch %s: %v\n", chatDBDir, err)
-				os.Exit(1)
-			}
-
-			fmt.Printf("Watching for iMessage changes in %s (debounce: %ds)\n", chatDBDir, debounceSec)
-			fmt.Println("Press Ctrl+C to stop")
-
-			// Debounce timer
-			var debounceTimer *time.Timer
-			debounceDelay := time.Duration(debounceSec) * time.Second
-
-			// Sync function with debouncing
-			triggerSync := func() {
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
-				debounceTimer = time.AfterFunc(debounceDelay, func() {
-					ctx := context.Background()
-					result, err := adapter.Sync(ctx, database, false)
-					if err != nil {
-						fmt.Printf("[%s] Sync error: %v\n", time.Now().Format("15:04:05"), err)
-						return
-					}
-					totalNew := result.EventsCreated + result.ReactionsCreated
-					if totalNew > 0 {
-						fmt.Printf("[%s] Synced %d new events (%d messages, %d reactions, %d attachments)\n",
-							time.Now().Format("15:04:05"),
-							totalNew,
-							result.EventsCreated,
-							result.ReactionsCreated,
-							result.AttachmentsCreated,
-						)
-					}
-				})
-			}
-
-			// Initial sync to catch up
-			fmt.Printf("[%s] Running initial sync...\n", time.Now().Format("15:04:05"))
-			ctx := context.Background()
-			result, err := adapter.Sync(ctx, database, false)
-			if err != nil {
-				fmt.Printf("[%s] Initial sync error: %v\n", time.Now().Format("15:04:05"), err)
-			} else if result.EventsCreated > 0 || result.ReactionsCreated > 0 {
-				fmt.Printf("[%s] Initial sync: %d events, %d reactions\n",
-					time.Now().Format("15:04:05"),
-					result.EventsCreated,
-					result.ReactionsCreated,
-				)
-			} else {
-				fmt.Printf("[%s] Already up to date\n", time.Now().Format("15:04:05"))
-			}
-
-			// Watch for file changes
-			for {
-				select {
-				case event, ok := <-watcher.Events:
-					if !ok {
-						return
-					}
-					// Only trigger on chat.db or WAL file changes
-					if strings.Contains(event.Name, "chat.db") {
-						triggerSync()
-					}
-				case err, ok := <-watcher.Errors:
-					if !ok {
-						return
-					}
-					fmt.Printf("[%s] Watch error: %v\n", time.Now().Format("15:04:05"), err)
-				}
-			}
-		},
-	}
-	watchIMessageCmd.Flags().Int("debounce-seconds", 2, "Minimum seconds between sync triggers")
-
 	// watch aix: watch aix.db for changes and trigger incremental sync
 	watchAIXCmd := &cobra.Command{
 		Use:   "aix",
@@ -1957,7 +1846,6 @@ mnemonic sync --background
 	watchCmd.AddCommand(watchRunCmd)
 	watchCmd.AddCommand(watchStatusCmd)
 	watchCmd.AddCommand(watchGmailCmd)
-	watchCmd.AddCommand(watchIMessageCmd)
 	watchCmd.AddCommand(watchAIXCmd)
 	rootCmd.AddCommand(watchCmd)
 
@@ -5284,12 +5172,12 @@ Examples:
 				}
 				if jsonOutput {
 					printJSON(map[string]any{
-						"ok":            err == nil,
-						"segments": c1,
-						"facets":        c2,
-						"persons":       c3,
-						"documents":     c4,
-						"total":         count,
+						"ok":        err == nil,
+						"segments":  c1,
+						"facets":    c2,
+						"persons":   c3,
+						"documents": c4,
+						"total":     count,
 					})
 					return
 				}
@@ -5840,15 +5728,15 @@ Examples:
 		Args: cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			type SearchResult struct {
-				EpisodeID      string  `json:"episode_id"`
-				Channel        string  `json:"channel,omitempty"`
-				ThreadID       string  `json:"thread_id,omitempty"`
-				ThreadName     string  `json:"thread_name,omitempty"`
-				StartTime      int64   `json:"start_time"`
-				EndTime        int64   `json:"end_time"`
-				EventCount     int     `json:"event_count"`
-				Similarity     float64 `json:"similarity"`
-				Preview        string  `json:"preview,omitempty"`
+				EpisodeID  string  `json:"episode_id"`
+				Channel    string  `json:"channel,omitempty"`
+				ThreadID   string  `json:"thread_id,omitempty"`
+				ThreadName string  `json:"thread_name,omitempty"`
+				StartTime  int64   `json:"start_time"`
+				EndTime    int64   `json:"end_time"`
+				EventCount int     `json:"event_count"`
+				Similarity float64 `json:"similarity"`
+				Preview    string  `json:"preview,omitempty"`
 			}
 
 			type Result struct {
@@ -6060,13 +5948,13 @@ Examples:
 
 			definitionName := strings.TrimSpace(routeDefinition)
 			segmentReq := search.SegmentSearchRequest{
-				Query:         queryText,
-				Channel:       routeChannel,
+				Query:          queryText,
+				Channel:        routeChannel,
 				DefinitionName: definitionName,
-				Limit:         routeLimit,
-				MinScore:      routeMinScore,
-				Model:         model,
-				UseEmbeddings: true,
+				Limit:          routeLimit,
+				MinScore:       routeMinScore,
+				Model:          model,
+				UseEmbeddings:  true,
 			}
 
 			searcher := search.NewSearcher(database, &search.GeminiEmbedder{Client: gemini.NewClient(apiKey)})
@@ -6277,7 +6165,7 @@ Examples:
 
 	// documents index - index skills and docs into document_heads
 	var indexSkillsPath string
-	
+
 	documentsIndexCmd := &cobra.Command{
 		Use:   "index",
 		Short: "Index skills and docs into document_heads",
@@ -6650,7 +6538,7 @@ Examples:
 	extractNexusCmd := &cobra.Command{
 		Use:   "nexus-cli",
 		Short: "Extract nexus CLI invocations from AI sessions",
-	Long: `Extract nexus CLI invocations from AI tool executions.
+		Long: `Extract nexus CLI invocations from AI tool executions.
 
 Examples:
   cortex extract nexus-cli --channel cursor --since 15d
@@ -6842,8 +6730,8 @@ Examples:
 
 	extractTerminalCmd := &cobra.Command{
 		Use:   "terminal",
-	Short: "Extract terminal command invocations from AI sessions",
-	Long: `Extract terminal command invocations from AI tool executions.
+		Short: "Extract terminal command invocations from AI sessions",
+		Long: `Extract terminal command invocations from AI tool executions.
 
 Examples:
   cortex extract terminal --channel cursor --since 15d

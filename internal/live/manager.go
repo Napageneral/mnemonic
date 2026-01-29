@@ -134,8 +134,6 @@ func (m *Manager) BuildSpecs() ([]WatcherSpec, error) {
 		opts := mergeOptions(adapterCfg.Live.Options, adapterCfg.Options)
 
 		switch adapterCfg.Type {
-		case "imessage":
-			specs = append(specs, NewIMessageWatcher(m.DB, name, opts, m.HeartbeatInterval, m.Logf))
 		case "eve":
 			specs = append(specs, NewEveWatcher(m.DB, name, opts, m.HeartbeatInterval, m.Logf))
 		case "aix":
@@ -159,7 +157,7 @@ func (m *Manager) BuildSpecs() ([]WatcherSpec, error) {
 
 func LiveSupported(adapterType string) bool {
 	switch adapterType {
-	case "imessage", "eve", "aix", "gogcli":
+	case "eve", "aix", "gogcli":
 		return true
 	default:
 		return false

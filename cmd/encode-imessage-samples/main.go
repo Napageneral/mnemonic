@@ -39,6 +39,7 @@ func main() {
 		os.Exit(2)
 	}
 	defer db.Close()
+	selfName := getSelfName(db)
 
 	samples := []struct {
 		label string
@@ -65,7 +66,6 @@ func main() {
 				WHERE channel = 'imessage'
 				  AND content_types LIKE '%"membership"%'
 				  AND metadata_json LIKE '%"action":"removed"%'
-				  AND metadata_json LIKE '%"other_contact_id"%'
 				ORDER BY timestamp DESC
 				LIMIT 1
 			`,
@@ -141,7 +141,7 @@ func main() {
 		fmt.Printf("</EPISODE_CONTEXT>\n\n")
 
 		fmt.Printf("<MESSAGES>\n")
-		fmt.Print(encodeEvents(db, events))
+		fmt.Print(encodeEvents(db, threadID, selfName, events))
 		fmt.Printf("</MESSAGES>\n\n")
 	}
 }
@@ -295,7 +295,7 @@ func fetchEvents(db *sql.DB, threadID string, centerTS int64, limit int, include
 	return out, nil
 }
 
-func encodeEvents(db *sql.DB, events []eventRow) string {
+func encodeEvents(db *sql.DB, threadID, selfName string, events []eventRow) string {
 	var sb strings.Builder
 	messageSnippets := map[string]string{}
 
@@ -325,7 +325,14 @@ func encodeEvents(db *sql.DB, events []eventRow) string {
 		}
 
 		if hasContentType(ev.ContentTypes, "membership") {
-			line := formatMembershipLine(db, ev.Sender, ev.MetadataJSON, ev.Members)
+			effectiveMetadata := ev.MetadataJSON
+			if parseMembershipAction(ev.MetadataJSON) == "removed" {
+				memberNames := splitPipeList(ev.Members)
+				if shouldFlipMembershipRemoval(db, threadID, ev.Timestamp.Unix(), selfName, memberNames) {
+					effectiveMetadata = overrideMembershipAction(ev.MetadataJSON, "added")
+				}
+			}
+			line := formatMembershipLine(db, ev.Sender, effectiveMetadata, ev.Members)
 			if line != "" {
 				sb.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, line))
 			}
@@ -349,10 +356,17 @@ func encodeEvents(db *sql.DB, events []eventRow) string {
 					parts = append(parts, "[Sticker]")
 				default:
 					fileName, mimeType := splitAttachmentDescriptor(att)
+					if !shouldIncludeAttachment(fileName, mimeType) {
+						continue
+					}
+					baseName := filepath.Base(strings.TrimSpace(fileName))
+					if baseName == "" || baseName == "." {
+						baseName = "file"
+					}
 					if mimeType != "" {
-						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", fileName, mimeType))
+						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", baseName, mimeType))
 					} else {
-						parts = append(parts, fmt.Sprintf("[Attachment] %s", fileName))
+						parts = append(parts, fmt.Sprintf("[Attachment] %s", baseName))
 					}
 				}
 			}
@@ -381,7 +395,7 @@ func getThreadInfo(db *sql.DB, threadID string) (string, string, bool) {
 		// Fallback if is_group column doesn't exist yet
 		_ = db.QueryRow(`SELECT name, channel FROM threads WHERE id = ?`, threadID).Scan(&name, &channel)
 	}
-	
+
 	threadName := ""
 	if name.Valid {
 		threadName = name.String
@@ -390,10 +404,10 @@ func getThreadInfo(db *sql.DB, threadID string) (string, string, bool) {
 	if channel.Valid {
 		threadChannel = channel.String
 	}
-	
+
 	// Use is_group from database (from Eve's sync of Apple's style column)
 	isGroupBool := isGroup.Valid && isGroup.Int64 == 1
-	
+
 	return threadName, threadChannel, isGroupBool
 }
 
@@ -477,7 +491,10 @@ func formatMembershipLine(db *sql.DB, actor string, metadataJSON sql.NullString,
 		return fmt.Sprintf("-> %s joined", memberList)
 	case "removed":
 		if memberList == "" {
-			return "-> unknown member left"
+			if actor != "" {
+				return fmt.Sprintf("-> %s removed a member", actor)
+			}
+			return "-> member left"
 		}
 		if actor != "" && actor != memberList {
 			return fmt.Sprintf("-> %s removed %s", actor, memberList)
@@ -525,6 +542,71 @@ func splitAttachmentDescriptor(att string) (string, string) {
 		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 	}
 	return strings.TrimSpace(att), ""
+}
+
+func shouldIncludeAttachment(fileName, mimeType string) bool {
+	name := strings.TrimSpace(fileName)
+	mimeType = strings.TrimSpace(mimeType)
+	if name == "" && mimeType == "" {
+		return false
+	}
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, ".pluginpayloadattachment") {
+		return false
+	}
+	return true
+}
+
+func overrideMembershipAction(metadataJSON sql.NullString, action string) sql.NullString {
+	if !metadataJSON.Valid || metadataJSON.String == "" {
+		return metadataJSON
+	}
+	updated := strings.Replace(metadataJSON.String, `"action":"removed"`, fmt.Sprintf(`"action":"%s"`, action), 1)
+	if updated == metadataJSON.String {
+		return metadataJSON
+	}
+	return sql.NullString{String: updated, Valid: true}
+}
+
+func getSelfName(db *sql.DB) string {
+	var name sql.NullString
+	_ = db.QueryRow(`
+		SELECT COALESCE(canonical_name, display_name, '')
+		FROM persons
+		WHERE is_me = 1
+		LIMIT 1
+	`).Scan(&name)
+	if name.Valid && strings.TrimSpace(name.String) != "" {
+		return strings.TrimSpace(name.String)
+	}
+	return ""
+}
+
+func shouldFlipMembershipRemoval(db *sql.DB, threadID string, timestamp int64, selfName string, memberNames []string) bool {
+	if threadID == "" || timestamp <= 0 || selfName == "" {
+		return false
+	}
+	isMember := false
+	for _, name := range memberNames {
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(selfName)) {
+			isMember = true
+			break
+		}
+	}
+	if !isMember {
+		return false
+	}
+	var count int
+	if err := db.QueryRow(`
+		SELECT COUNT(1)
+		FROM events
+		WHERE thread_id = ?
+		  AND direction = 'sent'
+		  AND timestamp < ?
+	`, threadID, timestamp).Scan(&count); err != nil {
+		return false
+	}
+	return count == 0
 }
 
 func reactionSnippet(content string) string {
@@ -644,7 +726,7 @@ func lookupMemberFromMetadata(db *sql.DB, metadataJSON string) string {
 	// Parse other_contact_id from JSON
 	// Format: {"action":"added","other_handle_id":123,"other_contact_id":"uuid-here"}
 	var contactID string
-	
+
 	// Simple extraction - find "other_contact_id":"..."
 	idx := strings.Index(metadataJSON, `"other_contact_id":"`)
 	if idx == -1 {
@@ -656,11 +738,11 @@ func lookupMemberFromMetadata(db *sql.DB, metadataJSON string) string {
 		return ""
 	}
 	contactID = metadataJSON[start : start+end]
-	
+
 	if contactID == "" {
 		return ""
 	}
-	
+
 	// Look up contact name with phone number matching fallback
 	var name sql.NullString
 	err := db.QueryRow(`
@@ -692,7 +774,7 @@ func lookupMemberFromMetadata(db *sql.DB, metadataJSON string) string {
 		)
 		WHERE c.id = ?
 	`, contactID).Scan(&name)
-	
+
 	if err != nil || !name.Valid {
 		return ""
 	}

@@ -185,9 +185,14 @@ func main() {
 				Channel:      thread.Channel,
 				IsGroup:      thread.IsGroup,
 				Participants: episodeParticipants,
+				ThreadID:     thread.ID,
+				SelfName:     selfName,
 			}
 			// Encode episode with rich context
 			content := encodeEpisodeWithContext(ep, episodeCtx)
+			if *verbose {
+				fmt.Printf("    Episode %d content:\n%s\n", i+1, content)
+			}
 
 			// Create pipeline input
 			input := memory.EpisodeInput{
@@ -293,11 +298,11 @@ type Episode struct {
 
 // Event represents a single event with sender info
 type Event struct {
-	ID         string
-	Timestamp  time.Time
-	SenderName string
-	Content    string
-	Direction  string
+	ID           string
+	Timestamp    time.Time
+	SenderName   string
+	Content      string
+	Direction    string
 	ContentTypes string
 	MetadataJSON sql.NullString
 	ReplyTo      sql.NullString
@@ -784,6 +789,8 @@ type EpisodeContext struct {
 	Channel      string
 	IsGroup      bool
 	Participants []string // Known participants in this thread
+	ThreadID     string
+	SelfName     string
 }
 
 // encodeEpisode encodes an episode with rich context for LLM extraction
@@ -811,7 +818,7 @@ func encodeEpisodeWithContext(ep Episode, ctx *EpisodeContext) string {
 	// Episode context header (if provided)
 	if ctx != nil {
 		sb.WriteString("<EPISODE_CONTEXT>\n")
-		
+
 		// Thread info
 		threadType := "1:1"
 		if ctx.IsGroup {
@@ -822,12 +829,12 @@ func encodeEpisodeWithContext(ep Episode, ctx *EpisodeContext) string {
 		} else {
 			sb.WriteString(fmt.Sprintf("Thread: (%s, %s)\n", ctx.Channel, threadType))
 		}
-		
+
 		// Participants
 		if len(ctx.Participants) > 0 {
 			sb.WriteString(fmt.Sprintf("Participants: %s\n", strings.Join(ctx.Participants, ", ")))
 		}
-		
+
 		sb.WriteString("</EPISODE_CONTEXT>\n\n")
 	}
 
@@ -850,18 +857,24 @@ func encodeEpisodeWithContext(ep Episode, ctx *EpisodeContext) string {
 				}
 			}
 			if snippet != "" {
-				sb.WriteString(fmt.Sprintf("  -> %s %s to \"%s\"\n", ev.SenderName, emoji, snippet))
+				sb.WriteString(fmt.Sprintf("[%s] -> %s %s to \"%s\"\n", timestamp, ev.SenderName, emoji, snippet))
 			} else {
-				sb.WriteString(fmt.Sprintf("  -> %s reacted %s\n", ev.SenderName, emoji))
+				sb.WriteString(fmt.Sprintf("[%s] -> %s reacted %s\n", timestamp, ev.SenderName, emoji))
 			}
 			continue
 		}
 
 		if hasContentType(ev.ContentTypes, "membership") {
-			line := formatMembershipLine(ev.SenderName, ev.MetadataJSON, ev.Members)
+			effectiveMetadata := ev.MetadataJSON
+			if parseMembershipAction(ev.MetadataJSON) == "removed" && ctx != nil && ctx.SelfName != "" {
+				memberNames := splitPipeList(ev.Members)
+				if shouldFlipMembershipRemovalEpisode(ep.Events, ev.Timestamp, ctx.SelfName, memberNames) {
+					effectiveMetadata = overrideMembershipAction(ev.MetadataJSON, "added")
+				}
+			}
+			line := formatMembershipLine(ev.SenderName, effectiveMetadata, ev.Members)
 			if line != "" {
-				sb.WriteString(line)
-				sb.WriteString("\n")
+				sb.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, line))
 			}
 			continue
 		}
@@ -883,10 +896,17 @@ func encodeEpisodeWithContext(ep Episode, ctx *EpisodeContext) string {
 					parts = append(parts, "[Sticker]")
 				default:
 					fileName, mimeType := splitAttachmentDescriptor(att)
+					if !shouldIncludeAttachment(fileName, mimeType) {
+						continue
+					}
+					baseName := filepath.Base(strings.TrimSpace(fileName))
+					if baseName == "" || baseName == "." {
+						baseName = "file"
+					}
 					if mimeType != "" {
-						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", fileName, mimeType))
+						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", baseName, mimeType))
 					} else {
-						parts = append(parts, fmt.Sprintf("[Attachment] %s", fileName))
+						parts = append(parts, fmt.Sprintf("[Attachment] %s", baseName))
 					}
 				}
 			}
@@ -946,6 +966,9 @@ func formatMembershipLine(actor string, metadataJSON sql.NullString, members sql
 		return fmt.Sprintf("-> %s joined", memberList)
 	case "removed":
 		if memberList == "" {
+			if actor != "" {
+				return fmt.Sprintf("-> %s removed a member", actor)
+			}
 			return "-> member left"
 		}
 		if actor != "" && actor != memberList {
@@ -997,6 +1020,52 @@ func splitAttachmentDescriptor(att string) (string, string) {
 		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 	}
 	return strings.TrimSpace(att), ""
+}
+
+func shouldIncludeAttachment(fileName, mimeType string) bool {
+	name := strings.TrimSpace(fileName)
+	mimeType = strings.TrimSpace(mimeType)
+	if name == "" && mimeType == "" {
+		return false
+	}
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, ".pluginpayloadattachment") {
+		return false
+	}
+	return true
+}
+
+func overrideMembershipAction(metadataJSON sql.NullString, action string) sql.NullString {
+	if !metadataJSON.Valid || metadataJSON.String == "" {
+		return metadataJSON
+	}
+	updated := strings.Replace(metadataJSON.String, `"action":"removed"`, fmt.Sprintf(`"action":"%s"`, action), 1)
+	if updated == metadataJSON.String {
+		return metadataJSON
+	}
+	return sql.NullString{String: updated, Valid: true}
+}
+
+func shouldFlipMembershipRemovalEpisode(events []Event, target time.Time, selfName string, memberNames []string) bool {
+	if selfName == "" {
+		return false
+	}
+	isMember := false
+	for _, name := range memberNames {
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(selfName)) {
+			isMember = true
+			break
+		}
+	}
+	if !isMember {
+		return false
+	}
+	for _, ev := range events {
+		if ev.Timestamp.Before(target) && ev.Direction == "sent" && strings.EqualFold(strings.TrimSpace(ev.SenderName), strings.TrimSpace(selfName)) {
+			return false
+		}
+	}
+	return true
 }
 
 func reactionSnippet(content string) string {

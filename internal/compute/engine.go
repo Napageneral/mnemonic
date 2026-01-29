@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1021,6 +1022,7 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 			e.id,
 			e.content,
 			e.timestamp,
+			e.thread_id,
 			COALESCE(p.canonical_name, c.display_name,
 				(SELECT ci.value FROM contact_identifiers ci 
 				 WHERE ci.contact_id = c.id AND ci.type IN ('phone', 'email')
@@ -1078,11 +1080,13 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 	defer rows.Close()
 
 	var sb strings.Builder
+	selfName := getSelfName(ctx, e.db)
 	messageSnippets := map[string]string{}
 	for rows.Next() {
 		var eventID string
 		var content sql.NullString
 		var timestamp int64
+		var threadID sql.NullString
 		var senderName sql.NullString
 		var direction string
 		var contentTypes string
@@ -1091,7 +1095,7 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 		var members sql.NullString
 		var attachments sql.NullString
 
-		if err := rows.Scan(&eventID, &content, &timestamp, &senderName, &direction, &contentTypes, &metadataJSON, &replyTo, &members, &attachments); err != nil {
+		if err := rows.Scan(&eventID, &content, &timestamp, &threadID, &senderName, &direction, &contentTypes, &metadataJSON, &replyTo, &members, &attachments); err != nil {
 			return "", err
 		}
 
@@ -1130,7 +1134,14 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 
 		isMembership := hasContentType(contentTypes, "membership")
 		if isMembership {
-			line := formatMembershipLine(name, metadataJSON, members)
+			effectiveMetadata := metadataJSON
+			if parseMembershipAction(metadataJSON) == "removed" {
+				memberNames := splitPipeList(members)
+				if shouldFlipMembershipRemoval(ctx, e.db, threadID.String, timestamp, selfName, memberNames) {
+					effectiveMetadata = overrideMembershipAction(metadataJSON, "added")
+				}
+			}
+			line := formatMembershipLine(name, effectiveMetadata, members)
 			if line != "" {
 				sb.WriteString(fmt.Sprintf("[%s] %s\n", timestampStr, line))
 			}
@@ -1159,10 +1170,17 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 					parts = append(parts, "[Sticker]")
 				default:
 					fileName, mimeType := splitAttachmentDescriptor(att)
+					if !shouldIncludeAttachment(fileName, mimeType) {
+						continue
+					}
+					baseName := filepath.Base(strings.TrimSpace(fileName))
+					if baseName == "" || baseName == "." {
+						baseName = "file"
+					}
 					if mimeType != "" {
-						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", fileName, mimeType))
+						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", baseName, mimeType))
 					} else {
-						parts = append(parts, fmt.Sprintf("[Attachment] %s", fileName))
+						parts = append(parts, fmt.Sprintf("[Attachment] %s", baseName))
 					}
 				}
 			}
@@ -1229,6 +1247,7 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 			e.id,
 			e.content,
 			e.timestamp,
+			e.thread_id,
 			ep.contact_id,
 			p.is_me,
 			e.direction,
@@ -1286,6 +1305,7 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 		var eventID string
 		var content sql.NullString
 		var timestamp int64
+		var threadID sql.NullString
 		var senderID sql.NullString
 		var isMe sql.NullInt64
 		var direction string
@@ -1295,7 +1315,7 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 		var members sql.NullString
 		var attachments sql.NullString
 
-		if err := rows.Scan(&eventID, &content, &timestamp, &senderID, &isMe, &direction, &contentTypes, &metadataJSON, &replyTo, &members, &attachments); err != nil {
+		if err := rows.Scan(&eventID, &content, &timestamp, &threadID, &senderID, &isMe, &direction, &contentTypes, &metadataJSON, &replyTo, &members, &attachments); err != nil {
 			return "", err
 		}
 		timestampStr := time.Unix(timestamp, 0).UTC().Format(time.RFC3339)
@@ -1349,7 +1369,14 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 		}
 
 		if hasContentType(contentTypes, "membership") {
-			line := formatMembershipLineMasked(name, labelForContact, metadataJSON, members)
+			effectiveMetadata := metadataJSON
+			if parseMembershipAction(metadataJSON) == "removed" {
+				memberNames := splitMemberDescriptorsMasked(members, labelForContact)
+				if shouldFlipMembershipRemoval(ctx, e.db, threadID.String, timestamp, "User", memberNames) {
+					effectiveMetadata = overrideMembershipAction(metadataJSON, "added")
+				}
+			}
+			line := formatMembershipLineMasked(name, labelForContact, effectiveMetadata, members)
 			if line != "" {
 				sb.WriteString(fmt.Sprintf("[%s] %s\n", timestampStr, line))
 			}
@@ -1373,10 +1400,17 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 					parts = append(parts, "[Sticker]")
 				default:
 					fileName, mimeType := splitAttachmentDescriptor(att)
+					if !shouldIncludeAttachment(fileName, mimeType) {
+						continue
+					}
+					baseName := filepath.Base(strings.TrimSpace(fileName))
+					if baseName == "" || baseName == "." {
+						baseName = "file"
+					}
 					if mimeType != "" {
-						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", fileName, mimeType))
+						parts = append(parts, fmt.Sprintf("[Attachment] %s (%s)", baseName, mimeType))
 					} else {
-						parts = append(parts, fmt.Sprintf("[Attachment] %s", fileName))
+						parts = append(parts, fmt.Sprintf("[Attachment] %s", baseName))
 					}
 				}
 			}
@@ -1432,6 +1466,9 @@ func formatMembershipLine(actor string, metadataJSON sql.NullString, members sql
 		return fmt.Sprintf("-> %s joined", memberList)
 	case "removed":
 		if memberList == "" {
+			if actor != "" {
+				return fmt.Sprintf("-> %s removed a member", actor)
+			}
 			return "-> member left"
 		}
 		if actor != "" && actor != memberList {
@@ -1467,6 +1504,9 @@ func formatMembershipLineMasked(actor string, labelFor func(contactID string, is
 		return fmt.Sprintf("-> %s joined", memberList)
 	case "removed":
 		if memberList == "" {
+			if actor != "" {
+				return fmt.Sprintf("-> %s removed a member", actor)
+			}
 			return "-> member left"
 		}
 		if actor != "" && actor != memberList {
@@ -1518,6 +1558,71 @@ func splitAttachmentDescriptor(att string) (string, string) {
 		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 	}
 	return strings.TrimSpace(att), ""
+}
+
+func shouldIncludeAttachment(fileName, mimeType string) bool {
+	name := strings.TrimSpace(fileName)
+	mimeType = strings.TrimSpace(mimeType)
+	if name == "" && mimeType == "" {
+		return false
+	}
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, ".pluginpayloadattachment") {
+		return false
+	}
+	return true
+}
+
+func overrideMembershipAction(metadataJSON sql.NullString, action string) sql.NullString {
+	if !metadataJSON.Valid || metadataJSON.String == "" {
+		return metadataJSON
+	}
+	updated := strings.Replace(metadataJSON.String, `"action":"removed"`, fmt.Sprintf(`"action":"%s"`, action), 1)
+	if updated == metadataJSON.String {
+		return metadataJSON
+	}
+	return sql.NullString{String: updated, Valid: true}
+}
+
+func getSelfName(ctx context.Context, db *sql.DB) string {
+	var name sql.NullString
+	_ = db.QueryRowContext(ctx, `
+		SELECT COALESCE(canonical_name, display_name, '')
+		FROM persons
+		WHERE is_me = 1
+		LIMIT 1
+	`).Scan(&name)
+	if name.Valid && strings.TrimSpace(name.String) != "" {
+		return strings.TrimSpace(name.String)
+	}
+	return ""
+}
+
+func shouldFlipMembershipRemoval(ctx context.Context, db *sql.DB, threadID string, timestamp int64, selfName string, memberNames []string) bool {
+	if threadID == "" || timestamp <= 0 || selfName == "" {
+		return false
+	}
+	isMember := false
+	for _, name := range memberNames {
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(selfName)) {
+			isMember = true
+			break
+		}
+	}
+	if !isMember {
+		return false
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(1)
+		FROM events
+		WHERE thread_id = ?
+		  AND direction = 'sent'
+		  AND timestamp < ?
+	`, threadID, timestamp).Scan(&count); err != nil {
+		return false
+	}
+	return count == 0
 }
 
 func splitReactionDescriptor(reaction string) (string, string) {

@@ -1,11 +1,8 @@
 package adapters
 
-// DEPRECATED: This adapter reads from eve.db which is no longer used.
-// Use IMessageAdapter (imessage.go) instead, which reads directly from chat.db
-// via the eve/imessage library package.
-//
-// This file is kept for reference during the migration period and will be
-// removed in a future version.
+// EveAdapter syncs iMessage events from Eve's warehouse database (eve.db).
+// This is the authoritative path for iMessage imports because it includes
+// contact name resolution and membership event normalization.
 
 import (
 	"context"
@@ -23,16 +20,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// EveAdapter syncs iMessage events from Eve's database
-//
-// Deprecated: Use IMessageAdapter instead, which reads directly from chat.db
+// EveAdapter syncs iMessage events from Eve's database.
 type EveAdapter struct {
 	eveDBPath string
 }
 
-// NewEveAdapter creates a new Eve adapter
-//
-// Deprecated: Use NewIMessageAdapter instead
+// NewEveAdapter creates a new Eve adapter.
 func NewEveAdapter() (*EveAdapter, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
