@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Napageneral/cortex/internal/gemini"
+	"github.com/Napageneral/mnemonic/internal/gemini"
 )
 
 // ExtractedEntity represents an entity extracted from episode content.

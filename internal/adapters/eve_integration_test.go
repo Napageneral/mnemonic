@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Napageneral/cortex/internal/db"
-	"github.com/Napageneral/cortex/internal/me"
+	"github.com/Napageneral/mnemonic/internal/db"
+	"github.com/Napageneral/mnemonic/internal/me"
 )
 
 func eveDBPath(t *testing.T) string {

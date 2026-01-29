@@ -11,7 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/Napageneral/cortex/internal/adapters"
+	"github.com/Napageneral/mnemonic/internal/adapters"
 )
 
 func NewIMessageWatcher(db *sql.DB, adapterName string, opts map[string]any, heartbeatInterval time.Duration, logf func(format string, args ...any)) WatcherSpec {

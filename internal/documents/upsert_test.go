@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Napageneral/cortex/internal/testutil"
+	"github.com/Napageneral/mnemonic/internal/testutil"
 )
 
 func TestUpsertDocument(t *testing.T) {

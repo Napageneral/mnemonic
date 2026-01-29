@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/state"
+	"github.com/Napageneral/mnemonic/internal/state"
 )
 
 const (

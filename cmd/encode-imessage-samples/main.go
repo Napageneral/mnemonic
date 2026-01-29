@@ -11,7 +11,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/Napageneral/cortex/internal/config"
+	"github.com/Napageneral/mnemonic/internal/config"
 )
 
 type eventRow struct {

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/chunk"
+	"github.com/Napageneral/mnemonic/internal/chunk"
 	"github.com/google/uuid"
 )
 

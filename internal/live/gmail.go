@@ -11,8 +11,8 @@ import (
 	stdsync "sync"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/config"
-	"github.com/Napageneral/cortex/internal/sync"
+	"github.com/Napageneral/mnemonic/internal/config"
+	"github.com/Napageneral/mnemonic/internal/sync"
 )
 
 func NewGmailWatcher(db *sql.DB, cfg *config.Config, adapterNames []string, opts map[string]any, heartbeatInterval time.Duration, logf func(format string, args ...any)) WatcherSpec {

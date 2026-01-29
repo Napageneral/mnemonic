@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/gemini"
+	"github.com/Napageneral/mnemonic/internal/gemini"
 )
 
 // PipelineConfig holds configuration for the memory extraction pipeline.

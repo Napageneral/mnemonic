@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/documents"
-	"github.com/Napageneral/cortex/internal/testutil"
+	"github.com/Napageneral/mnemonic/internal/documents"
+	"github.com/Napageneral/mnemonic/internal/testutil"
 	"github.com/google/uuid"
 )
 

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/bus"
-	"github.com/Napageneral/cortex/internal/contacts"
-	"github.com/Napageneral/cortex/internal/state"
+	"github.com/Napageneral/mnemonic/internal/bus"
+	"github.com/Napageneral/mnemonic/internal/contacts"
+	"github.com/Napageneral/mnemonic/internal/state"
 )
 
 // CalendarAdapter syncs Google Calendar events via gogcli.

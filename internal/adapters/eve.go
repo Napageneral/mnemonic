@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/contacts"
+	"github.com/Napageneral/mnemonic/internal/contacts"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
@@ -1195,11 +1195,19 @@ func (e *EveAdapter) syncMembershipEvents(ctx context.Context, eveDB, cortexDB *
 		if groupTitle.Valid && groupTitle.String != "" {
 			metadata["group_title"] = groupTitle.String
 		}
+		memberContactID := ""
 		if memberID.Valid {
 			metadata["other_handle_id"] = memberID.Int64
 			if contactID, ok := contactMap[memberID.Int64]; ok && contactID != "" {
 				metadata["other_contact_id"] = contactID
-				_, _ = stmtInsertParticipant.Exec(eventID, contactID, "member")
+				memberContactID = contactID
+			}
+		}
+
+		actorContactID := ""
+		if actorID.Valid {
+			if contactID, ok := contactMap[actorID.Int64]; ok && contactID != "" {
+				actorContactID = contactID
 			}
 		}
 
@@ -1230,10 +1238,16 @@ func (e *EveAdapter) syncMembershipEvents(ctx context.Context, eveDB, cortexDB *
 			updated++
 		}
 
-		if actorID.Valid {
-			if contactID, ok := contactMap[actorID.Int64]; ok && contactID != "" {
-				_, _ = stmtInsertParticipant.Exec(eventID, contactID, "sender")
-			}
+		// Insert participants AFTER the event exists.
+		if memberContactID != "" {
+			_, _ = stmtInsertParticipant.Exec(eventID, memberContactID, "member")
+		}
+		// If member is missing and action wasn't from me, treat it as "me" being added/removed.
+		if memberContactID == "" && !isFromMe && meContactID != "" && actorContactID != "" {
+			_, _ = stmtInsertParticipant.Exec(eventID, meContactID, "member")
+		}
+		if actorContactID != "" {
+			_, _ = stmtInsertParticipant.Exec(eventID, actorContactID, "sender")
 		}
 		if isFromMe && meContactID != "" {
 			_, _ = stmtInsertParticipant.Exec(eventID, meContactID, "sender")

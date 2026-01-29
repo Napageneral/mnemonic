@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/contacts"
+	"github.com/Napageneral/mnemonic/internal/contacts"
 	"github.com/google/uuid"
 )
 

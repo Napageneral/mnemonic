@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/Napageneral/cortex/internal/gemini"
+	"github.com/Napageneral/mnemonic/internal/gemini"
 )
 
 // GeminiEmbedder wraps the Gemini client for embedding queries.

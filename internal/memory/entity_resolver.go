@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/gemini"
+	"github.com/Napageneral/mnemonic/internal/gemini"
 	"github.com/google/uuid"
 )
 

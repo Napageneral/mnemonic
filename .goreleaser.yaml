@@ -1,8 +1,8 @@
 version: 2
 
 builds:
-  - main: ./cmd/cortex
-    binary: cortex
+  - main: ./cmd/mnemonic
+    binary: mnemonic
     goos:
       - darwin
       - linux
@@ -19,8 +19,8 @@ brews:
   - repository:
       owner: Napageneral
       name: homebrew-tap
-    homepage: https://github.com/Napageneral/cortex
-    description: Cortex intelligence layer
+    homepage: https://github.com/Napageneral/mnemonic
+    description: Mnemonic unified memory system
 
 archives:
   - format: tar.gz

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/gemini"
+	"github.com/Napageneral/mnemonic/internal/gemini"
 	"github.com/Napageneral/taskengine/engine"
 	"github.com/Napageneral/taskengine/queue"
 	"github.com/google/uuid"
@@ -1099,6 +1099,7 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 		if senderName.Valid && senderName.String != "" {
 			name = senderName.String
 		}
+		timestampStr := time.Unix(timestamp, 0).UTC().Format(time.RFC3339)
 
 		isReaction := hasContentType(contentTypes, "reaction")
 		if isReaction {
@@ -1120,9 +1121,9 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 				}
 			}
 			if snippet != "" {
-				sb.WriteString(fmt.Sprintf("  -> %s %s to \"%s\"\n", name, emoji, snippet))
+				sb.WriteString(fmt.Sprintf("[%s] -> %s %s to \"%s\"\n", timestampStr, name, emoji, snippet))
 			} else {
-				sb.WriteString(fmt.Sprintf("  -> %s reacted %s\n", name, emoji))
+				sb.WriteString(fmt.Sprintf("[%s] -> %s reacted %s\n", timestampStr, name, emoji))
 			}
 			continue
 		}
@@ -1131,8 +1132,7 @@ func (e *Engine) buildEpisodeText(ctx context.Context, episodeID string) (string
 		if isMembership {
 			line := formatMembershipLine(name, metadataJSON, members)
 			if line != "" {
-				sb.WriteString(line)
-				sb.WriteString("\n")
+				sb.WriteString(fmt.Sprintf("[%s] %s\n", timestampStr, line))
 			}
 			continue
 		}
@@ -1298,6 +1298,7 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 		if err := rows.Scan(&eventID, &content, &timestamp, &senderID, &isMe, &direction, &contentTypes, &metadataJSON, &replyTo, &members, &attachments); err != nil {
 			return "", err
 		}
+		timestampStr := time.Unix(timestamp, 0).UTC().Format(time.RFC3339)
 
 		labelForContact := func(contactID string, isMeFlag bool) string {
 			if contactID == "" {
@@ -1340,9 +1341,9 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 				}
 			}
 			if snippet != "" {
-				sb.WriteString(fmt.Sprintf("  -> %s %s to \"%s\"\n", name, emoji, snippet))
+				sb.WriteString(fmt.Sprintf("[%s] -> %s %s to \"%s\"\n", timestampStr, name, emoji, snippet))
 			} else {
-				sb.WriteString(fmt.Sprintf("  -> %s reacted %s\n", name, emoji))
+				sb.WriteString(fmt.Sprintf("[%s] -> %s reacted %s\n", timestampStr, name, emoji))
 			}
 			continue
 		}
@@ -1350,8 +1351,7 @@ func (e *Engine) buildEpisodeTextMasked(ctx context.Context, episodeID string) (
 		if hasContentType(contentTypes, "membership") {
 			line := formatMembershipLineMasked(name, labelForContact, metadataJSON, members)
 			if line != "" {
-				sb.WriteString(line)
-				sb.WriteString("\n")
+				sb.WriteString(fmt.Sprintf("[%s] %s\n", timestampStr, line))
 			}
 			continue
 		}

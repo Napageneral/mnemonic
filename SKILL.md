@@ -1,46 +1,57 @@
 ---
-name: cortex
-description: Workspace intelligence layer - aggregates communications across all channels into a single queryable event store
-homepage: https://github.com/Napageneral/cortex
-metadata: {"nexus":{"emoji":"🧠","os":["darwin","linux"],"requires":{"bins":["cortex"]},"install":[{"id":"brew","kind":"brew","formula":"Napageneral/tap/cortex","bins":["cortex"],"label":"Install via Homebrew"},{"id":"go","kind":"shell","script":"go install github.com/Napageneral/cortex/cmd/cortex@latest","bins":["cortex"],"label":"Install via Go"}]}}
+name: mnemonic
+description: Unified memory system - aggregates communications and AI sessions across all channels into searchable, analyzable memory
+homepage: https://github.com/Napageneral/mnemonic
+metadata: {"nexus":{"emoji":"🧠","os":["darwin","linux"],"requires":{"bins":["mnemonic"]},"install":[{"id":"brew","kind":"brew","formula":"Napageneral/tap/mnemonic","bins":["mnemonic"],"label":"Install via Homebrew"},{"id":"go","kind":"shell","script":"go install github.com/Napageneral/mnemonic/cmd/mnemonic@latest","bins":["mnemonic"],"label":"Install via Go"}]}}
 ---
 
-# Cortex — Workspace Intelligence Layer
+# Mnemonic — Unified Memory System
 
-Cortex aggregates your communications across all channels (iMessage, Gmail, Slack, AI sessions, etc.) into a single queryable event store with identity resolution.
+Mnemonic aggregates your communications and AI sessions across all channels (iMessage, Gmail, Cursor, Codex, etc.) into a unified searchable memory with identity resolution, semantic search, and analysis.
 
-## Why Cortex?
+## Why Mnemonic?
 
-Your communications are fragmented:
+Your communications and AI interactions are fragmented:
 - iMessage threads with some people
 - Email conversations with others
-- Slack for work
 - AI chat sessions in Cursor
+- More AI sessions in Codex
 
-Cortex unifies them into one data layer, so you can ask:
-- "What did I discuss with Dad across ALL channels?"
-- "Show me everything related to the HTAA project"
-- "Who have I communicated with most this year?"
+Mnemonic unifies them into one memory layer, so you can:
+- Search across ALL channels semantically
+- Extract memories and entities automatically
+- Enable smart forking for AI sessions
+- Query your complete communication history
+
+## Architecture
+
+Mnemonic uses a **ledger-based** architecture:
+
+- **Core Ledger** — Shared infrastructure: episodes, analysis runs, facets, embeddings
+- **Events Ledger** — Human communications: iMessage, Gmail, calendar, trimmed AI turns
+- **Agents Ledger** — Full fidelity AI sessions: messages, turns, tool calls (for smart forking)
 
 ## Quick Start
 
 ```bash
 # Initialize
-cortex init
+mnemonic init
 
 # Configure your identity
-cortex me set --name "Tyler Brandt" --phone "+17072876731" --email "tnapathy@gmail.com"
+mnemonic me set --name "Your Name" --phone "+1234567890" --email "you@example.com"
 
-# Connect adapters (requires Eve and gogcli installed)
-cortex connect imessage
-cortex connect gmail --account tnapathy@gmail.com
+# Connect adapters
+mnemonic connect imessage
+mnemonic connect gmail --account you@gmail.com
+mnemonic connect cursor  # AI sessions via AIX
 
 # Sync all channels
-cortex sync
+mnemonic sync
 
 # Query
-cortex events --person "Dad" --since "2025-01-01"
-cortex people --top 20
+mnemonic events --person "Dad" --since "2025-01-01"
+mnemonic search "authentication flow"
+mnemonic people --top 20
 ```
 
 ## Commands
@@ -49,50 +60,41 @@ cortex people --top 20
 
 | Command | Description |
 |---------|-------------|
-| `cortex init` | Initialize config and event store |
-| `cortex me set --name "..." --phone "..." --email "..."` | Configure your identity |
-| `cortex connect <adapter>` | Configure a channel adapter |
-| `cortex adapters` | List configured adapters |
+| `mnemonic init` | Initialize config and database |
+| `mnemonic me set --name "..." --phone "..." --email "..."` | Configure your identity |
+| `mnemonic connect <adapter>` | Configure a channel adapter |
+| `mnemonic adapters` | List configured adapters |
 
 ### Sync
 
 | Command | Description |
 |---------|-------------|
-| `cortex sync` | Sync all enabled adapters |
-| `cortex sync imessage` | Sync specific adapter (positional) |
-| `cortex sync --adapter imessage` | Sync specific adapter |
-| `cortex sync --full` | Force full re-sync |
+| `mnemonic sync` | Sync all enabled adapters |
+| `mnemonic sync imessage` | Sync specific adapter (positional) |
+| `mnemonic sync --adapter imessage` | Sync specific adapter |
+| `mnemonic sync --full` | Force full re-sync |
 
 ### Query
 
 | Command | Description |
 |---------|-------------|
-| `cortex events` | List events with filters |
-| `cortex events --person "Dad"` | Filter by person |
-| `cortex events --channel imessage` | Filter by channel |
-| `cortex events --since 2025-01-01` | Filter by date |
-| `cortex people` | List all people |
-| `cortex people --top 20` | Top contacts by event count |
-| `cortex people "Dad"` | Show person details |
-| `cortex timeline 2026-01` | Events in time period |
-| `cortex timeline --today` | Today's events |
-| `cortex db query <sql>` | Raw SQL access |
+| `mnemonic events` | List events with filters |
+| `mnemonic events --person "Dad"` | Filter by person |
+| `mnemonic events --channel imessage` | Filter by channel |
+| `mnemonic events --since 2025-01-01` | Filter by date |
+| `mnemonic search "query"` | Semantic search across all content |
+| `mnemonic people` | List all people |
+| `mnemonic people --top 20` | Top contacts by event count |
+| `mnemonic timeline 2026-01` | Events in time period |
+| `mnemonic db query <sql>` | Raw SQL access |
 
 ### Identity Management
 
 | Command | Description |
 |---------|-------------|
-| `cortex identify` | List all people + identities |
-| `cortex identify --merge "Person A" "Person B"` | Merge two people |
-| `cortex identify --add "Dad" --email "dad@example.com"` | Add identity |
-
-### Tags
-
-| Command | Description |
-|---------|-------------|
-| `cortex tag list` | List all tags |
-| `cortex tag add --event <id> --tag "project:htaa"` | Tag an event |
-| `cortex tag add --filter "person:Dane" --tag "context:business"` | Bulk tag |
+| `mnemonic identify` | List all people + identities |
+| `mnemonic identify --merge "Person A" "Person B"` | Merge two people |
+| `mnemonic identify --add "Dad" --email "dad@example.com"` | Add identity |
 
 ## Adapters
 
@@ -106,7 +108,7 @@ eve init && eve sync
 
 Connect:
 ```bash
-cortex connect imessage
+mnemonic connect imessage
 ```
 
 ### Gmail (via gogcli)
@@ -119,52 +121,41 @@ gog auth add your@gmail.com
 
 Connect:
 ```bash
-cortex connect gmail --account your@gmail.com
+mnemonic connect gmail --account your@gmail.com
 ```
 
-### AI Sessions (via aix)
+### AI Sessions (via AIX)
 
 Connect:
 ```bash
-cortex connect cursor
+mnemonic connect cursor
 ```
 
-### X/Twitter (via bird)
-
-Prerequisites:
-```bash
-brew install steipete/tap/bird
-bird check  # Verify auth via Chrome cookies
-```
-
-Connect:
-```bash
-cortex connect x
-```
-
-Syncs: bookmarks, likes, mentions
+This imports AI sessions from Cursor via AIX:
+- **Events Ledger**: Trimmed turns (user message + response)
+- **Agents Ledger**: Full fidelity (all messages, tool calls, turns)
 
 ## Output Formats
 
 All commands support `--json` / `-j`:
 
 ```bash
-cortex events --json | jq '.events[] | select(.channel == "imessage")'
-cortex people --top 10 --json
+mnemonic events --json | jq '.events[] | select(.channel == "imessage")'
+mnemonic people --top 10 --json
 ```
 
 ## Configuration
 
-Config: `~/.config/cortex/config.yaml`
+Config: `~/.config/mnemonic/config.yaml`
 
 ```yaml
 me:
-  canonical_name: "Tyler Brandt"
+  canonical_name: "Your Name"
   identities:
     - channel: imessage
-      identifier: "+17072876731"
+      identifier: "+1234567890"
     - channel: email
-      identifier: "tnapathy@gmail.com"
+      identifier: "you@example.com"
 
 adapters:
   imessage:
@@ -173,71 +164,49 @@ adapters:
   gmail:
     type: gogcli
     enabled: true
-    account: tnapathy@gmail.com
+    account: you@gmail.com
+  cursor:
+    type: aix
+    enabled: true
 ```
 
-Data: `~/Library/Application Support/Cortex/cortex.db`
+Data: `~/Library/Application Support/Mnemonic/mnemonic.db`
 
 ## Bootstrap (for AI agents)
 
 ```bash
 # Check if installed
-which cortex && cortex version
+which mnemonic && mnemonic version
 
 # Install
-brew install Napageneral/tap/cortex
-# OR: go install github.com/Napageneral/cortex/cmd/cortex@latest
+brew install Napageneral/tap/mnemonic
+# OR: go install github.com/Napageneral/mnemonic/cmd/mnemonic@latest
 
 # Setup
-cortex init
+mnemonic init
 
 # Configure identity
-cortex me set --name "User Name" --email "user@example.com"
+mnemonic me set --name "User Name" --email "user@example.com"
 
-# Connect adapters (assumes Eve/gogcli already set up)
-cortex connect imessage
-cortex connect gmail --account user@gmail.com
+# Connect adapters (assumes Eve/gogcli/AIX already set up)
+mnemonic connect imessage
+mnemonic connect gmail --account user@gmail.com
+mnemonic connect cursor
 
 # Sync
-cortex sync
+mnemonic sync
 
 # Verify
-cortex db query "SELECT COUNT(*) as count FROM events"
-cortex people --top 5
-```
-
-## Event Schema
-
-Events have these core properties:
-- `id` — Unique identifier
-- `timestamp` — When it happened
-- `channel` — imessage, gmail, slack, cursor, etc.
-- `content_types` — ["text"], ["text", "image"], etc.
-- `direction` — sent, received, observed
-- `participants` — People involved (resolved via identity)
-
-Queryable via:
-```bash
-cortex db query "SELECT * FROM events WHERE channel = 'imessage' LIMIT 10"
+mnemonic db query "SELECT COUNT(*) as count FROM events"
+mnemonic people --top 5
 ```
 
 ## Tips for Agents
 
-1. Use `cortex people --top 10` to understand who the user communicates with most
-2. Use `cortex events --person "Name"` to get context on a relationship
-3. Use `cortex timeline --today` for recent activity
-4. Filter by channel to focus on specific contexts
-5. Use `--json` output for programmatic access
-6. Raw SQL via `cortex db query` for complex queries
-
-Example agent workflow:
-```bash
-# "Tell me about my communication with Dad"
-cortex people "Dad"                              # Get identity info
-cortex events --person "Dad" --since 2025-01-01  # Recent events
-cortex db query "SELECT channel, COUNT(*) FROM events e
-  JOIN event_participants ep ON e.id = ep.event_id 
-  JOIN persons p ON ep.person_id = p.id 
-  WHERE p.display_name = 'Dad' 
-  GROUP BY channel"                             # Channel breakdown
-```
+1. Use `mnemonic people --top 10` to understand who the user communicates with most
+2. Use `mnemonic events --person "Name"` to get context on a relationship
+3. Use `mnemonic search "topic"` for semantic search across all content
+4. Use `mnemonic timeline --today` for recent activity
+5. Filter by channel to focus on specific contexts
+6. Use `--json` output for programmatic access
+7. Raw SQL via `mnemonic db query` for complex queries

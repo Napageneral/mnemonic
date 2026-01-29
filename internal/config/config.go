@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config represents the cortex configuration
+// Config represents the mnemonic configuration
 type Config struct {
 	Me       MeConfig                `yaml:"me"`
 	Adapters map[string]AdapterConfig `yaml:"adapters"`
@@ -44,6 +44,10 @@ type LiveConfig struct {
 // GetConfigDir returns the XDG-compliant config directory
 func GetConfigDir() (string, error) {
 	// Explicit override (useful for tests and portable installs)
+	if override := os.Getenv("MNEMONIC_CONFIG_DIR"); override != "" {
+		return override, nil
+	}
+	// Legacy fallbacks for migration
 	if override := os.Getenv("CORTEX_CONFIG_DIR"); override != "" {
 		return override, nil
 	}
@@ -61,12 +65,16 @@ func GetConfigDir() (string, error) {
 		}
 		base = filepath.Join(home, ".config")
 	}
-	return filepath.Join(base, "cortex"), nil
+	return filepath.Join(base, "mnemonic"), nil
 }
 
 // GetDataDir returns the platform-specific data directory
 func GetDataDir() (string, error) {
 	// Explicit override (useful for tests and portable installs)
+	if override := os.Getenv("MNEMONIC_DATA_DIR"); override != "" {
+		return override, nil
+	}
+	// Legacy fallbacks for migration
 	if override := os.Getenv("CORTEX_DATA_DIR"); override != "" {
 		return override, nil
 	}
@@ -80,14 +88,14 @@ func GetDataDir() (string, error) {
 	}
 
 	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, "Library", "Application Support", "Cortex"), nil
+		return filepath.Join(home, "Library", "Application Support", "Mnemonic"), nil
 	}
 
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "cortex"), nil
+		return filepath.Join(xdg, "mnemonic"), nil
 	}
 
-	return filepath.Join(home, ".local", "share", "cortex"), nil
+	return filepath.Join(home, ".local", "share", "mnemonic"), nil
 }
 
 // Load loads config from the config file

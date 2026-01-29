@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/contacts"
+	"github.com/Napageneral/mnemonic/internal/contacts"
 	_ "modernc.org/sqlite"
 )
 

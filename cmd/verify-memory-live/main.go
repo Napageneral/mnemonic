@@ -29,8 +29,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/gemini"
-	"github.com/Napageneral/cortex/internal/memory"
+	"github.com/Napageneral/mnemonic/internal/gemini"
+	"github.com/Napageneral/mnemonic/internal/memory"
 	_ "github.com/mattn/go-sqlite3"
 )
 

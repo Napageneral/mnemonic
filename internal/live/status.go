@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/Napageneral/cortex/internal/config"
+	"github.com/Napageneral/mnemonic/internal/config"
 )
 
 type AdapterLiveStatus struct {

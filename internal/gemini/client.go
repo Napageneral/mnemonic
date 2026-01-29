@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/ratelimit"
+	"github.com/Napageneral/mnemonic/internal/ratelimit"
 )
 
 const (

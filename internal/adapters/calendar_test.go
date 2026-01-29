@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Napageneral/cortex/internal/db"
+	"github.com/Napageneral/mnemonic/internal/db"
 )
 
 func TestCalendarAdapter_EnsureTables(t *testing.T) {

@@ -1,8 +1,20 @@
+-- ============================================
+-- MNEMONIC DATABASE SCHEMA
+-- ============================================
+-- Organized into three ledgers:
+-- 1. Core Ledger - shared infrastructure (episodes, analysis, embeddings)
+-- 2. Events Ledger - human communications + trimmed AI turns
+-- 3. Agents Ledger - full fidelity AI sessions (for smart forking)
+
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at INTEGER NOT NULL
 );
+
+-- ============================================
+-- EVENTS LEDGER (human communications + trimmed AI turns)
+-- ============================================
 
 -- Events: All communication + document events across channels
 CREATE TABLE IF NOT EXISTS events (
@@ -244,14 +256,14 @@ CREATE TABLE IF NOT EXISTS bus_events (
     id TEXT NOT NULL UNIQUE,
     type TEXT NOT NULL,
     adapter TEXT,
-    cortex_event_id TEXT,
+    mnemonic_event_id TEXT,
     created_at INTEGER NOT NULL,
     payload_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_bus_events_created_at ON bus_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_bus_events_type ON bus_events(type);
-CREATE INDEX IF NOT EXISTS idx_bus_events_event ON bus_events(cortex_event_id);
+CREATE INDEX IF NOT EXISTS idx_bus_events_event ON bus_events(mnemonic_event_id);
 
 -- Sync jobs: Track background/resumable sync progress per adapter
 CREATE TABLE IF NOT EXISTS sync_jobs (
@@ -382,6 +394,10 @@ CREATE TABLE IF NOT EXISTS merge_events (
 
 CREATE INDEX IF NOT EXISTS idx_merge_events_status ON merge_events(status);
 CREATE INDEX IF NOT EXISTS idx_merge_events_persons ON merge_events(source_person_id, target_person_id);
+
+-- ============================================
+-- CORE LEDGER (shared infrastructure)
+-- ============================================
 
 -- Episode definitions: HOW to chunk events into episodes
 CREATE TABLE IF NOT EXISTS episode_definitions (
@@ -766,10 +782,116 @@ CREATE TABLE IF NOT EXISTS entity_merge_events (
 
 CREATE INDEX IF NOT EXISTS idx_entity_merge_events_target ON entity_merge_events(target_entity_id);
 
+-- ============================================
+-- AGENTS LEDGER (full fidelity AI session data)
+-- ============================================
+-- These tables store full fidelity AI session data from AIX for smart forking,
+-- replay, and deep analysis. Separate from Events ledger to keep event schema clean.
+
+-- Agent sessions: Full fidelity session records from AIX
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,                   -- 'cursor', 'codex', 'nexus', 'clawdbot'
+    model TEXT,
+    project TEXT,
+    created_at INTEGER,
+    message_count INTEGER DEFAULT 0,
+    
+    -- Subagent linking
+    parent_session_id TEXT REFERENCES agent_sessions(id),
+    parent_message_id TEXT,
+    tool_call_id TEXT,
+    task_description TEXT,
+    task_status TEXT,
+    is_subagent INTEGER DEFAULT 0,
+    
+    -- Session context
+    context_token_limit INTEGER,
+    context_tokens_used INTEGER,
+    is_agentic INTEGER DEFAULT 0,
+    force_mode TEXT,
+    workspace_path TEXT,
+    context_json TEXT,
+    conversation_state TEXT,
+    
+    -- Raw data preservation
+    raw_json TEXT,
+    summary TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_source ON agent_sessions(source);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_parent ON agent_sessions(parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_tool_call ON agent_sessions(tool_call_id);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_created ON agent_sessions(created_at);
+
+-- Agent messages: All messages from AI sessions
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,                     -- 'user', 'assistant', 'system', 'tool'
+    content TEXT,
+    sequence INTEGER,
+    timestamp INTEGER,
+    
+    -- Message metadata
+    checkpoint_id TEXT,
+    is_agentic INTEGER DEFAULT 0,
+    is_plan_execution INTEGER DEFAULT 0,
+    context_json TEXT,
+    cursor_rules_json TEXT,
+    metadata_json TEXT                      -- Full original metadata blob
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_messages_session ON agent_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_role ON agent_messages(role);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_timestamp ON agent_messages(timestamp);
+
+-- Agent turns: Query+response exchanges for smart forking
+CREATE TABLE IF NOT EXISTS agent_turns (
+    id TEXT PRIMARY KEY,                    -- Same as final response message ID
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    parent_turn_id TEXT,                    -- References agent_turns(id) but not enforced to allow parallel inserts
+    
+    query_message_ids TEXT,                 -- JSON array of input message IDs
+    response_message_id TEXT,               -- References agent_messages(id) but not enforced
+    
+    model TEXT,
+    token_count INTEGER,
+    timestamp INTEGER,
+    has_children INTEGER DEFAULT 0,
+    tool_call_count INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_turns_session ON agent_turns(session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_turns_parent ON agent_turns(parent_turn_id);
+CREATE INDEX IF NOT EXISTS idx_agent_turns_timestamp ON agent_turns(timestamp);
+
+-- Agent tool calls: Tool invocations within messages
+CREATE TABLE IF NOT EXISTS agent_tool_calls (
+    id TEXT PRIMARY KEY,
+    message_id TEXT REFERENCES agent_messages(id),
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    
+    tool_name TEXT,
+    tool_number INTEGER,
+    params_json TEXT,
+    result_json TEXT,
+    status TEXT,
+    
+    child_session_id TEXT REFERENCES agent_sessions(id),
+    started_at INTEGER,
+    completed_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_session ON agent_tool_calls(session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_message ON agent_tool_calls(message_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_child ON agent_tool_calls(child_session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_name ON agent_tool_calls(tool_name);
+
 -- Insert initial schema version
 INSERT OR IGNORE INTO schema_version (version, applied_at)
-VALUES (20, strftime('%s', 'now'));
+VALUES (21, strftime('%s', 'now'));
 
--- NOTE: pii_extraction_v1 analysis type is now registered via `cortex compute seed` command
+-- NOTE: pii_extraction_v1 analysis type is now registered via `mnemonic compute seed` command
 -- This matches the pattern used for convo-all-v1 and is more maintainable
--- Run `cortex compute seed` after initialization to register analysis types
+-- Run `mnemonic compute seed` after initialization to register analysis types

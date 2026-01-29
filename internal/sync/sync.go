@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/adapters"
-	"github.com/Napageneral/cortex/internal/config"
+	"github.com/Napageneral/mnemonic/internal/adapters"
+	"github.com/Napageneral/mnemonic/internal/config"
 )
 
 // AdapterResult contains the result of syncing a single adapter
@@ -307,6 +307,42 @@ func syncAdapter(ctx context.Context, db *sql.DB, name string, cfg config.Adapte
 			return result
 		}
 		adapter, err = adapters.NewAixAdapter(source)
+		if err != nil {
+			result.Error = fmt.Sprintf("Failed to create adapter: %v", err)
+			return result
+		}
+
+	case "aix-events":
+		// AIX events adapter: exports trimmed turns to Events ledger
+		sourceVal, ok := cfg.Options["source"]
+		if !ok {
+			result.Error = "aix-events adapter requires 'source' in config (e.g., cursor)"
+			return result
+		}
+		source, ok := sourceVal.(string)
+		if !ok || source == "" {
+			result.Error = "aix-events adapter 'source' must be a string"
+			return result
+		}
+		adapter, err = adapters.NewAixEventsAdapter(source)
+		if err != nil {
+			result.Error = fmt.Sprintf("Failed to create adapter: %v", err)
+			return result
+		}
+
+	case "aix-agents":
+		// AIX agents adapter: exports full fidelity to Agents ledger
+		sourceVal, ok := cfg.Options["source"]
+		if !ok {
+			result.Error = "aix-agents adapter requires 'source' in config (e.g., cursor)"
+			return result
+		}
+		source, ok := sourceVal.(string)
+		if !ok || source == "" {
+			result.Error = "aix-agents adapter 'source' must be a string"
+			return result
+		}
+		adapter, err = adapters.NewAixAgentsAdapter(source)
 		if err != nil {
 			result.Error = fmt.Sprintf("Failed to create adapter: %v", err)
 			return result

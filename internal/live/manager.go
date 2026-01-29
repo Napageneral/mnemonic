@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/Napageneral/cortex/internal/config"
+	"github.com/Napageneral/mnemonic/internal/config"
 )
 
 type WatcherSpec struct {
