@@ -1,0 +1,42 @@
+[
+  {
+    "id": "a3730dd7-5c30-4081-9876-3c28e4505cc9",
+    "source": "cursor",
+    "model": "claude-4.5-opus-high-thinking",
+    "project": "",
+    "created_at": 1769615873704,
+    "message_count": 56,
+    "parent_session_id": null,
+    "parent_message_id": null,
+    "tool_call_id": null,
+    "task_description": null,
+    "task_status": null,
+    "is_subagent": 0,
+    "context_token_limit": 176000,
+    "context_tokens_used": 38191,
+    "is_agentic": 1,
+    "force_mode": "edit",
+    "workspace_path": null,
+    "summary": ""
+  },
+  {
+    "id": "task-toolu_bdrk_01BFM9VaztN9grH5e4zFhQyZ",
+    "source": "cursor",
+    "model": "composer-1",
+    "project": "",
+    "created_at": 1769614863215,
+    "message_count": 16,
+    "parent_session_id": "872520ab-a30e-4d85-8f7e-9f925992cebe",
+    "parent_message_id": "3d2088a8-1557-45b5-9d35-41434b5ee0b5",
+    "tool_call_id": "toolu_bdrk_01BFM9VaztN9grH5e4zFhQyZ",
+    "task_description": "Update ONBOARDING.md to align",
+    "task_status": "completed",
+    "is_subagent": 1,
+    "context_token_limit": null,
+    "context_tokens_used": null,
+    "is_agentic": 1,
+    "force_mode": "edit",
+    "workspace_path": null,
+    "summary": ""
+  }
+]

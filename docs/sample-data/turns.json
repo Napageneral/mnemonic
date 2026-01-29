@@ -1,0 +1,26 @@
+[
+  {
+    "id": "4af766f6-a2a9-45cd-a4b2-894cc72d8799",
+    "session_id": "08d7466f-0570-468b-b4e9-021329a796e1",
+    "parent_turn_id": "21716f95-4bc8-4322-b0d7-532a45bf086a",
+    "query_message_ids": "[\"e7f1a22a-8dd6-4b9f-b859-87d31c5a68fd\"]",
+    "response_message_id": "4af766f6-a2a9-45cd-a4b2-894cc72d8799",
+    "model": "gpt-5.2-codex-xhigh",
+    "token_count": 0,
+    "timestamp": 1769616666905,
+    "has_children": 0,
+    "tool_call_count": 19
+  },
+  {
+    "id": "11f91921-e7e6-4509-afb9-746653c8e639",
+    "session_id": "a3730dd7-5c30-4081-9876-3c28e4505cc9",
+    "parent_turn_id": "54455e57-4d63-4220-9c9f-106e4cadfc1d",
+    "query_message_ids": "[\"342e1403-90ec-43b4-8a0e-037385b88ea6\"]",
+    "response_message_id": "11f91921-e7e6-4509-afb9-746653c8e639",
+    "model": "claude-4.5-opus-high-thinking",
+    "token_count": 0,
+    "timestamp": 1769616558745,
+    "has_children": 0,
+    "tool_call_count": 1
+  }
+]
